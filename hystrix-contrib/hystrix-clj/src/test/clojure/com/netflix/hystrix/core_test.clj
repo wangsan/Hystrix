@@ -1,8 +1,25 @@
+;
+; Copyright 2016 Netflix, Inc.
+;
+; Licensed under the Apache License, Version 2.0 (the "License");
+; you may not use this file except in compliance with the License.
+; You may obtain a copy of the License at
+;
+;     http://www.apache.org/licenses/LICENSE-2.0
+;
+; Unless required by applicable law or agreed to in writing, software
+; distributed under the License is distributed on an "AS IS" BASIS,
+; WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+; See the License for the specific language governing permissions and
+; limitations under the License.
+;
+
 (ns com.netflix.hystrix.core-test
   (:use com.netflix.hystrix.core)
   (:require [clojure.test :refer [deftest testing is are use-fixtures]])
   (:import [com.netflix.hystrix Hystrix HystrixExecutable]
-           [com.netflix.hystrix.strategy.concurrency HystrixRequestContext]))
+           [com.netflix.hystrix.strategy.concurrency HystrixRequestContext]
+           [com.netflix.hystrix.exception HystrixRuntimeException]))
 
 ; reset hystrix after each execution, for consistency and sanity
 (defn reset-fixture
@@ -129,9 +146,9 @@
           (execute (instantiate (normalize (assoc base-def :run-fn str))
                                 "hello" "-" "world"))))
 
-    (testing "throws IllegalStateException if called twice on same instance"
+    (testing "throws HystrixRuntimeException if called twice on same instance"
       (let [instance (instantiate (normalize (assoc base-def :run-fn str)) "hi")]
-        (is (thrown? IllegalStateException
+        (is (thrown? HystrixRuntimeException
                      (execute instance)
                      (execute instance)))))
 
@@ -149,12 +166,6 @@
                   :group-key :my-group
                   :command-key :my-command
                   :run-fn + }]
-
-    (testing "throws IllegalStateException if called twice on same instance"
-      (let [instance (instantiate (normalize base-def))]
-        (is (thrown? IllegalStateException
-                     (queue instance)
-                     (queue instance)))))
 
     (testing "queues a HystrixCommand"
       (is (= "hello-world")

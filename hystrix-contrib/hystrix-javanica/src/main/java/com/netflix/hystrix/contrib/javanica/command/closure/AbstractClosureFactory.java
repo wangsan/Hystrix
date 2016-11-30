@@ -17,10 +17,13 @@ package com.netflix.hystrix.contrib.javanica.command.closure;
 
 import com.google.common.base.Throwables;
 import com.netflix.hystrix.contrib.javanica.command.ClosureCommand;
+import com.netflix.hystrix.contrib.javanica.command.MetaHolder;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
+import static com.netflix.hystrix.contrib.javanica.utils.EnvUtils.isCompileWeaving;
+import static com.netflix.hystrix.contrib.javanica.utils.ajc.AjcUtils.invokeAjcMethod;
 import static org.slf4j.helpers.MessageFormatter.format;
 
 /**
@@ -31,13 +34,16 @@ public abstract class AbstractClosureFactory implements ClosureFactory {
     static final String ERROR_TYPE_MESSAGE = "return type of '{}' method should be {}.";
     static final String INVOKE_METHOD = "invoke";
 
-    /**
-     * {@inheritDoc}.
-     */
     @Override
-    public Closure createClosure(final Method method, final Object o, final Object... args) {
+    public Closure createClosure(MetaHolder metaHolder, Method method, Object o, Object... args) {
         try {
-            Object closureObj = method.invoke(o, args); // creates instance of an anonymous class
+            Object closureObj;
+            method.setAccessible(true);
+            if (isCompileWeaving()) {
+                closureObj = invokeAjcMethod(metaHolder.getAjcMethod(), o, metaHolder, args);
+            } else {
+                closureObj = method.invoke(o, args); // creates instance of an anonymous class
+            }
             return createClosure(method.getName(), closureObj);
         } catch (InvocationTargetException e) {
             throw Throwables.propagate(e.getCause());

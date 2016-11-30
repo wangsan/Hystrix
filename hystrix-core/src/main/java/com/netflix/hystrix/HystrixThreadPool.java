@@ -1,12 +1,12 @@
 /**
  * Copyright 2012 Netflix, Inc.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,19 +15,21 @@
  */
 package com.netflix.hystrix;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-
-import rx.Scheduler;
-
 import com.netflix.hystrix.strategy.HystrixPlugins;
 import com.netflix.hystrix.strategy.concurrency.HystrixConcurrencyStrategy;
 import com.netflix.hystrix.strategy.concurrency.HystrixContextScheduler;
 import com.netflix.hystrix.strategy.metrics.HystrixMetricsPublisherFactory;
 import com.netflix.hystrix.strategy.properties.HystrixPropertiesFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import rx.Scheduler;
 import rx.functions.Func0;
+
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * ThreadPool used to executed {@link HystrixCommand#run()} on separate threads when configured to do so with {@link HystrixCommandProperties#executionIsolationStrategy()}.
@@ -46,10 +48,10 @@ public interface HystrixThreadPool {
 
     /**
      * Implementation of {@link ThreadPoolExecutor}.
-     * 
+     *
      * @return ThreadPoolExecutor
      */
-    public ThreadPoolExecutor getExecutor();
+    public ExecutorService getExecutor();
 
     public Scheduler getScheduler();
 
@@ -75,7 +77,7 @@ public interface HystrixThreadPool {
      * <p>
      * This allows dynamic control of the max queueSize versus whatever the actual max queueSize is so that dynamic changes can be done via property changes rather than needing an app
      * restart to adjust when commands should be rejected from queuing up.
-     * 
+     *
      * @return boolean whether there is space on the queue
      */
     public boolean isQueueSpaceAvailable();
@@ -94,7 +96,7 @@ public interface HystrixThreadPool {
          * Get the {@link HystrixThreadPool} instance for a given {@link HystrixThreadPoolKey}.
          * <p>
          * This is thread-safe and ensures only 1 {@link HystrixThreadPool} per {@link HystrixThreadPoolKey}.
-         * 
+         *
          * @return {@link HystrixThreadPool} instance
          */
         /* package */static HystrixThreadPool getInstance(HystrixThreadPoolKey threadPoolKey, HystrixThreadPoolProperties.Setter propertiesBuilder) {
@@ -143,7 +145,8 @@ public interface HystrixThreadPool {
             }
             for (HystrixThreadPool pool : threadPools.values()) {
                 try {
-                    pool.getExecutor().awaitTermination(timeout, unit);
+                    while (! pool.getExecutor().awaitTermination(timeout, unit)) {
+                    }
                 } catch (InterruptedException e) {
                     throw new RuntimeException("Interrupted while waiting for thread-pools to terminate. Pools may not be correctly shutdown or cleared.", e);
                 }
@@ -157,6 +160,8 @@ public interface HystrixThreadPool {
      * @ThreadSafe
      */
     /* package */static class HystrixThreadPoolDefault implements HystrixThreadPool {
+        private static final Logger logger = LoggerFactory.getLogger(HystrixThreadPoolDefault.class);
+
         private final HystrixThreadPoolProperties properties;
         private final BlockingQueue<Runnable> queue;
         private final ThreadPoolExecutor threadPool;
@@ -168,11 +173,18 @@ public interface HystrixThreadPool {
             HystrixConcurrencyStrategy concurrencyStrategy = HystrixPlugins.getInstance().getConcurrencyStrategy();
             this.queueSize = properties.maxQueueSize().get();
             this.queue = concurrencyStrategy.getBlockingQueue(queueSize);
-            this.metrics = HystrixThreadPoolMetrics.getInstance(
-                    threadPoolKey,
-                    concurrencyStrategy.getThreadPool(threadPoolKey, properties.coreSize(), properties.coreSize(), properties.keepAliveTimeMinutes(), TimeUnit.MINUTES, queue),
-                    properties);
-            this.threadPool = metrics.getThreadPool();
+
+            if (properties.getAllowMaximumSizeToDivergeFromCoreSize()) {
+                this.metrics = HystrixThreadPoolMetrics.getInstance(threadPoolKey,
+                        concurrencyStrategy.getThreadPool(threadPoolKey, properties.coreSize(), properties.maximumSize(), properties.keepAliveTimeMinutes(), TimeUnit.MINUTES, queue),
+                        properties);
+                this.threadPool = this.metrics.getThreadPool();
+            } else {
+                this.metrics = HystrixThreadPoolMetrics.getInstance(threadPoolKey,
+                        concurrencyStrategy.getThreadPool(threadPoolKey, properties.coreSize(), properties.coreSize(), properties.keepAliveTimeMinutes(), TimeUnit.MINUTES, queue),
+                        properties);
+                this.threadPool = this.metrics.getThreadPool();
+            }
 
             /* strategy: HystrixMetricsPublisherThreadPool */
             HystrixMetricsPublisherFactory.createOrRetrievePublisherForThreadPool(threadPoolKey, this.metrics, this.properties);
@@ -203,9 +215,35 @@ public interface HystrixThreadPool {
 
         // allow us to change things via fast-properties by setting it each time
         private void touchConfig() {
-            threadPool.setCorePoolSize(properties.coreSize().get());
-            threadPool.setMaximumPoolSize(properties.coreSize().get()); // we always want maxSize the same as coreSize, we are not using a dynamically resizing pool
-            threadPool.setKeepAliveTime(properties.keepAliveTimeMinutes().get(), TimeUnit.MINUTES); // this doesn't really matter since we're not resizing
+            final int dynamicCoreSize = properties.coreSize().get();
+            final int dynamicMaximumSize = properties.maximumSize().get();
+            int updatedMaximumSize = dynamicMaximumSize;
+            final boolean allowSizesToDiverge = properties.getAllowMaximumSizeToDivergeFromCoreSize();
+            boolean maxTooLow = false;
+
+            if (allowSizesToDiverge && dynamicMaximumSize < dynamicCoreSize) {
+                //if user sets maximum < core (or defaults get us there), we need to maintain invariant of core <= maximum
+                updatedMaximumSize = dynamicCoreSize;
+                maxTooLow = true;
+            }
+
+            if (!allowSizesToDiverge) {
+                //if user has not opted in to allowing sizes to diverge, ensure maximum == core
+                updatedMaximumSize = dynamicCoreSize;
+            }
+
+            // In JDK 6, setCorePoolSize and setMaximumPoolSize will execute a lock operation. Avoid them if the pool size is not changed.
+            if (threadPool.getCorePoolSize() != dynamicCoreSize || (allowSizesToDiverge && threadPool.getMaximumPoolSize() != updatedMaximumSize)) {
+                if (maxTooLow) {
+                    logger.error("Hystrix ThreadPool configuration for : " + metrics.getThreadPoolKey().name() + " is trying to set coreSize = " +
+                            dynamicCoreSize + " and maximumSize = " + dynamicMaximumSize + ".  Maximum size will be set to " +
+                            dynamicCoreSize + ", the coreSize value, since it must be equal to or greater than the coreSize value");
+                }
+                threadPool.setCorePoolSize(dynamicCoreSize);
+                threadPool.setMaximumPoolSize(updatedMaximumSize);
+            }
+
+            threadPool.setKeepAliveTime(properties.keepAliveTimeMinutes().get(), TimeUnit.MINUTES);
         }
 
         @Override

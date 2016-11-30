@@ -19,7 +19,7 @@
 	 * 
 	 * Publish this externally as "HystrixCommandMonitor"
 	 */
-	window.HystrixCommandMonitor = function(containerId, args) {
+	window.HystrixCommandMonitor = function(index, containerId, args) {
 		
 		var self = this; // keep scope under control
 		self.args = args;
@@ -27,6 +27,7 @@
 			self.args = {};
 		}
 		
+		this.index = index;
 		this.containerId = containerId;
 		
 		/**
@@ -66,6 +67,7 @@
 		/* public */ self.eventSourceMessageListener = function(e) {
 			var data = JSON.parse(e.data);
 			if(data) {
+				data.index = self.index;
 				// check for reportingHosts (if not there, set it to 1 for singleHost vs cluster)
 				if(!data.reportingHosts) {
 					data.reportingHosts = 1;
@@ -91,7 +93,7 @@
 			// assert all the values we need
 			validateData(data);
 			// escape string used in jQuery & d3 selectors
-			data.escapedName = data.name.replace(/([ !"#$%&'()*+,./:;<=>?@[\]^`{|}~])/g,'\\$1');
+			data.escapedName = data.name.replace(/([ !"#$%&'()*+,./:;<=>?@[\]^`{|}~])/g,'\\$1') + '_' + data.index;
 			// do math
 			convertAllAvg(data);
 			calcRatePerSecond(data);
@@ -113,11 +115,7 @@
 		function convertAllAvg(data) {
 			convertAvg(data, "errorPercentage", true);
 			convertAvg(data, "latencyExecute_mean", false);
-			convertAvg(data, "latencyTotal_mean", false);
-			
-			// the following will break when it becomes a compound string if the property is dynamically changed
-			convertAvg(data, "propertyValue_metricsRollingStatisticalWindowInMilliseconds", false);
-		}
+        }
 		
 		function convertAvg(data, key, decimal) {
 			if (decimal) {
@@ -172,8 +170,6 @@
             assertNotNull(data,"currentConcurrentExecutionCount");
             assertNotNull(data,"latencyExecute_mean");
             assertNotNull(data,"latencyExecute");
-            assertNotNull(data,"latencyTotal_mean");
-            assertNotNull(data,"latencyTotal");
             assertNotNull(data,"propertyValue_circuitBreakerRequestVolumeThreshold");
             assertNotNull(data,"propertyValue_circuitBreakerSleepWindowInMilliseconds");
             assertNotNull(data,"propertyValue_circuitBreakerErrorThresholdPercentage");

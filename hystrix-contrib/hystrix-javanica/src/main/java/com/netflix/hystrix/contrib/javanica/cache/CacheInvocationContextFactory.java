@@ -40,8 +40,8 @@ public class CacheInvocationContextFactory {
      * @return initialized and configured {@link CacheInvocationContext}
      */
     public static CacheInvocationContext<CacheResult> createCacheResultInvocationContext(MetaHolder metaHolder) {
-        if (metaHolder.getMethod().isAnnotationPresent(CacheResult.class)) {
-            Method method = metaHolder.getMethod();
+        Method method = metaHolder.getMethod();
+        if (method.isAnnotationPresent(CacheResult.class)) {
             CacheResult cacheResult = method.getAnnotation(CacheResult.class);
             MethodExecutionAction cacheKeyMethod = createCacheKeyAction(cacheResult.cacheKeyMethod(), metaHolder);
             return new CacheInvocationContext<CacheResult>(cacheResult, cacheKeyMethod, metaHolder.getObj(), method, metaHolder.getArgs());
@@ -56,8 +56,8 @@ public class CacheInvocationContextFactory {
      * @return initialized and configured {@link CacheInvocationContext}
      */
     public static CacheInvocationContext<CacheRemove> createCacheRemoveInvocationContext(MetaHolder metaHolder) {
-        if (metaHolder.getMethod().isAnnotationPresent(CacheRemove.class)) {
-            Method method = metaHolder.getMethod();
+        Method method = metaHolder.getMethod();
+        if (method.isAnnotationPresent(CacheRemove.class)) {
             CacheRemove cacheRemove = method.getAnnotation(CacheRemove.class);
             MethodExecutionAction cacheKeyMethod = createCacheKeyAction(cacheRemove.cacheKeyMethod(), metaHolder);
             return new CacheInvocationContext<CacheRemove>(cacheRemove, cacheKeyMethod, metaHolder.getObj(), method, metaHolder.getArgs());
@@ -78,7 +78,9 @@ public class CacheInvocationContextFactory {
                 throw new HystrixCachingException("return type of cacheKey method must be String. Method: '" + method + "', Class: '"
                         + metaHolder.getObj().getClass() + "'");
             }
-            cacheKeyAction = new MethodExecutionAction(metaHolder.getObj(), cacheKeyMethod, metaHolder.getArgs());
+
+            MetaHolder cMetaHolder = MetaHolder.builder().obj(metaHolder.getObj()).method(cacheKeyMethod).args(metaHolder.getArgs()).build();
+            cacheKeyAction = new MethodExecutionAction(cMetaHolder.getObj(), cacheKeyMethod, cMetaHolder.getArgs(), cMetaHolder);
         }
         return cacheKeyAction;
     }

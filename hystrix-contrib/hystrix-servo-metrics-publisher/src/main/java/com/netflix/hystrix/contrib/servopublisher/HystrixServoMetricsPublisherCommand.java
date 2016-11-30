@@ -15,14 +15,17 @@
  */
 package com.netflix.hystrix.contrib.servopublisher;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import com.netflix.hystrix.HystrixCircuitBreaker;
 import com.netflix.hystrix.HystrixCommandGroupKey;
 import com.netflix.hystrix.HystrixCommandKey;
 import com.netflix.hystrix.HystrixCommandMetrics;
 import com.netflix.hystrix.HystrixCommandProperties;
+import com.netflix.hystrix.HystrixEventType;
+import com.netflix.hystrix.metric.consumer.CumulativeCommandEventCounterStream;
+import com.netflix.hystrix.metric.consumer.RollingCommandEventCounterStream;
+import com.netflix.hystrix.metric.consumer.RollingCommandLatencyDistributionStream;
+import com.netflix.hystrix.metric.consumer.RollingCommandMaxConcurrencyStream;
+import com.netflix.hystrix.metric.consumer.RollingCommandUserLatencyDistributionStream;
 import com.netflix.hystrix.strategy.metrics.HystrixMetricsPublisherCommand;
 import com.netflix.hystrix.util.HystrixRollingNumberEvent;
 import com.netflix.servo.DefaultMonitorRegistry;
@@ -31,11 +34,23 @@ import com.netflix.servo.monitor.BasicCompositeMonitor;
 import com.netflix.servo.monitor.Monitor;
 import com.netflix.servo.monitor.MonitorConfig;
 import com.netflix.servo.tag.Tag;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import rx.functions.Func0;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Implementation of {@link HystrixMetricsPublisherCommand} using Servo (https://github.com/Netflix/servo)
+ * Concrete Implementation of {@link HystrixMetricsPublisherCommand} using Servo (https://github.com/Netflix/servo)
+ *
+ * This class should encapsulate all logic around how to pull metrics.  This will allow any other custom Servo publisher
+ * to extend.  Then, if that class wishes to override {@link #initialize()}, that concrete implementation can choose
+ * by picking the set of semantic metrics and names, rather than providing an implementation of how.
  */
 public class HystrixServoMetricsPublisherCommand extends HystrixServoMetricsPublisherAbstract implements HystrixMetricsPublisherCommand {
+
+    private static final Logger logger = LoggerFactory.getLogger(HystrixServoMetricsPublisherCommand.class);
 
     private final HystrixCommandKey key;
     private final HystrixCommandGroupKey commandGroupKey;
@@ -99,6 +114,11 @@ public class HystrixServoMetricsPublisherCommand extends HystrixServoMetricsPubl
         BasicCompositeMonitor commandMetricsMonitor = new BasicCompositeMonitor(commandMetricsConfig, monitors);
 
         DefaultMonitorRegistry.getInstance().register(commandMetricsMonitor);
+        RollingCommandEventCounterStream.getInstance(key, properties).startCachingStreamValuesIfUnstarted();
+        CumulativeCommandEventCounterStream.getInstance(key, properties).startCachingStreamValuesIfUnstarted();
+        RollingCommandLatencyDistributionStream.getInstance(key, properties).startCachingStreamValuesIfUnstarted();
+        RollingCommandUserLatencyDistributionStream.getInstance(key, properties).startCachingStreamValuesIfUnstarted();
+        RollingCommandMaxConcurrencyStream.getInstance(key, properties).startCachingStreamValuesIfUnstarted();
     }
 
     @Override
@@ -111,8 +131,155 @@ public class HystrixServoMetricsPublisherCommand extends HystrixServoMetricsPubl
         return servoInstanceTag;
     }
 
+    protected final Func0<Number> currentConcurrentExecutionCountThunk = new Func0<Number>() {
+        @Override
+        public Integer call() {
+            return metrics.getCurrentConcurrentExecutionCount();
+        }
+    };
+
+    protected final Func0<Number> rollingMaxConcurrentExecutionCountThunk = new Func0<Number>() {
+        @Override
+        public Long call() {
+            return metrics.getRollingMaxConcurrentExecutions();
+        }
+    };
+
+    protected final Func0<Number> errorPercentageThunk = new Func0<Number>() {
+        @Override
+        public Integer call() {
+            return metrics.getHealthCounts().getErrorPercentage();
+        }
+    };
+
+    protected final Func0<Number> currentTimeThunk = new Func0<Number>() {
+        @Override
+        public Number call() {
+            return System.currentTimeMillis();
+        }
+    };
+
+    /**
+     * Convert from HystrixEventType to HystrixRollingNumberEvent
+     * @param eventType HystrixEventType
+     * @return HystrixRollingNumberEvent
+     * @deprecated Instead, use {@link HystrixRollingNumberEvent#from(HystrixEventType)}
+     */
+    @Deprecated
+    protected final HystrixRollingNumberEvent getRollingNumberTypeFromEventType(HystrixEventType eventType) {
+        return HystrixRollingNumberEvent.from(eventType);
+    }
+
+    protected Monitor<Number> getCumulativeMonitor(final String name, final HystrixEventType event) {
+        return new CounterMetric(MonitorConfig.builder(name).withTag(getServoTypeTag()).withTag(getServoInstanceTag()).build()) {
+            @Override
+            public Long getValue() {
+                return metrics.getCumulativeCount(event);
+            }
+        };
+    }
+
+    protected Monitor<Number> safelyGetCumulativeMonitor(final String name, final Func0<HystrixEventType> eventThunk) {
+        return new CounterMetric(MonitorConfig.builder(name).withTag(getServoTypeTag()).withTag(getServoInstanceTag()).build()) {
+            @Override
+            public Long getValue() {
+                try {
+                    HystrixEventType eventType = eventThunk.call();
+                    return metrics.getCumulativeCount(HystrixRollingNumberEvent.from(eventType));
+                } catch (NoSuchFieldError error) {
+                    logger.error("While publishing Servo metrics, error looking up eventType for : {}.  Please check that all Hystrix versions are the same!", name);
+                    return 0L;
+                }
+            }
+        };
+    }
+
+    protected Monitor<Number> getRollingMonitor(final String name, final HystrixEventType event) {
+        return new GaugeMetric(MonitorConfig.builder(name).withTag(DataSourceLevel.DEBUG).withTag(getServoTypeTag()).withTag(getServoInstanceTag()).build()) {
+            @Override
+            public Long getValue() {
+                return metrics.getRollingCount(event);
+            }
+        };
+    }
+
+    protected Monitor<Number> safelyGetRollingMonitor(final String name, final Func0<HystrixEventType> eventThunk) {
+        return new GaugeMetric(MonitorConfig.builder(name).withTag(DataSourceLevel.DEBUG).withTag(getServoTypeTag()).withTag(getServoInstanceTag()).build()) {
+            @Override
+            public Long getValue() {
+                try {
+                    HystrixEventType eventType = eventThunk.call();
+                    return metrics.getRollingCount(HystrixRollingNumberEvent.from(eventType));
+                } catch (NoSuchFieldError error) {
+                    logger.error("While publishing Servo metrics, error looking up eventType for : {}.  Please check that all Hystrix versions are the same!", name);
+                    return 0L;
+                }
+            }
+        };
+    }
+
+    protected Monitor<Number> getExecutionLatencyMeanMonitor(final String name) {
+        return new GaugeMetric(MonitorConfig.builder(name).build()) {
+            @Override
+            public Number getValue() {
+                return metrics.getExecutionTimeMean();
+            }
+        };
+    }
+
+    protected Monitor<Number> getExecutionLatencyPercentileMonitor(final String name, final double percentile) {
+        return new GaugeMetric(MonitorConfig.builder(name).build()) {
+            @Override
+            public Number getValue() {
+                return metrics.getExecutionTimePercentile(percentile);
+            }
+        };
+    }
+
+    protected Monitor<Number> getTotalLatencyMeanMonitor(final String name) {
+        return new GaugeMetric(MonitorConfig.builder(name).build()) {
+            @Override
+            public Number getValue() {
+                return metrics.getTotalTimeMean();
+            }
+        };
+    }
+
+    protected Monitor<Number> getTotalLatencyPercentileMonitor(final String name, final double percentile) {
+        return new GaugeMetric(MonitorConfig.builder(name).build()) {
+            @Override
+            public Number getValue() {
+                return metrics.getTotalTimePercentile(percentile);
+            }
+        };
+    }
+
+    protected Monitor<Number> getCurrentValueMonitor(final String name, final Func0<Number> metricToEvaluate) {
+        return new GaugeMetric(MonitorConfig.builder(name).build()) {
+            @Override
+            public Number getValue() {
+                return metricToEvaluate.call();
+            }
+        };
+    }
+
+    protected Monitor<Number> getCurrentValueMonitor(final String name, final Func0<Number> metricToEvaluate, final Tag tag) {
+        return new GaugeMetric(MonitorConfig.builder(name).withTag(tag).build()) {
+            @Override
+            public Number getValue() {
+                return metricToEvaluate.call();
+            }
+        };
+    }
+
     /**
      * Servo will flatten metric names as: getServoTypeTag()_getServoInstanceTag()_monitorName
+     *
+     * An implementation note.  If there's a version mismatch between hystrix-core and hystrix-servo-metric-publisher,
+     * the code below may reference a HystrixEventType that does not exist in hystrix-core.  If this happens,
+     * a j.l.NoSuchFieldError occurs.  Since this data is not being generated by hystrix-core, it's safe to count it as 0
+     * and we should log an error to get users to update their dependency set.
+     *
      */
     private List<Monitor<?>> getServoMonitors() {
 
@@ -126,161 +293,229 @@ public class HystrixServoMetricsPublisherCommand extends HystrixServoMetricsPubl
         });
 
         // allow Servo and monitor to know exactly at what point in time these stats are for so they can be plotted accurately
-        monitors.add(new GaugeMetric(MonitorConfig.builder("currentTime").withTag(DataSourceLevel.DEBUG).build()) {
-            @Override
-            public Number getValue() {
-                return System.currentTimeMillis();
-            }
-        });
+        monitors.add(getCurrentValueMonitor("currentTime", currentTimeThunk, DataSourceLevel.DEBUG));
 
         // cumulative counts
-        monitors.add(getCumulativeCountForEvent("countBadRequests", metrics, HystrixRollingNumberEvent.BAD_REQUEST));
-        monitors.add(getCumulativeCountForEvent("countCollapsedRequests", metrics, HystrixRollingNumberEvent.COLLAPSED));
-        monitors.add(getCumulativeCountForEvent("countEmit", metrics, HystrixRollingNumberEvent.EMIT));
-        monitors.add(getCumulativeCountForEvent("countExceptionsThrown", metrics, HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        monitors.add(getCumulativeCountForEvent("countFailure", metrics, HystrixRollingNumberEvent.FAILURE));
-        monitors.add(getCumulativeCountForEvent("countFallbackEmit", metrics, HystrixRollingNumberEvent.FALLBACK_EMIT));
-        monitors.add(getCumulativeCountForEvent("countFallbackFailure", metrics, HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        monitors.add(getCumulativeCountForEvent("countFallbackRejection", metrics, HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        monitors.add(getCumulativeCountForEvent("countFallbackSuccess", metrics, HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        monitors.add(getCumulativeCountForEvent("countResponsesFromCache", metrics, HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-        monitors.add(getCumulativeCountForEvent("countSemaphoreRejected", metrics, HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        monitors.add(getCumulativeCountForEvent("countShortCircuited", metrics, HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        monitors.add(getCumulativeCountForEvent("countSuccess", metrics, HystrixRollingNumberEvent.SUCCESS));
-        monitors.add(getCumulativeCountForEvent("countThreadPoolRejected", metrics, HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        monitors.add(getCumulativeCountForEvent("countTimeout", metrics, HystrixRollingNumberEvent.TIMEOUT));
+        monitors.add(safelyGetCumulativeMonitor("countBadRequests", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.BAD_REQUEST;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countCollapsedRequests", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.COLLAPSED;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countEmit", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.EMIT;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countExceptionsThrown", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.EXCEPTION_THROWN;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countFailure", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FAILURE;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countFallbackEmit", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_EMIT;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countFallbackFailure", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_FAILURE;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countFallbackMissing", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_MISSING;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countFallbackRejection", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_REJECTION;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countFallbackSuccess", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_SUCCESS;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countResponsesFromCache", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.RESPONSE_FROM_CACHE;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countSemaphoreRejected", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.SEMAPHORE_REJECTED;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countShortCircuited", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.SHORT_CIRCUITED;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countSuccess", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.SUCCESS;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countThreadPoolRejected", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.THREAD_POOL_REJECTED;
+            }
+        }));
+        monitors.add(safelyGetCumulativeMonitor("countTimeout", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.TIMEOUT;
+            }
+        }));
 
         // rolling counts
-        monitors.add(getRollingCountForEvent("rollingCountBadRequests", metrics, HystrixRollingNumberEvent.BAD_REQUEST));
-        monitors.add(getRollingCountForEvent("rollingCountCollapsedRequests", metrics, HystrixRollingNumberEvent.COLLAPSED));
-        monitors.add(getRollingCountForEvent("rollingCountEmit", metrics, HystrixRollingNumberEvent.EMIT));
-        monitors.add(getRollingCountForEvent("rollingCountExceptionsThrown", metrics, HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        monitors.add(getRollingCountForEvent("rollingCountFailure", metrics, HystrixRollingNumberEvent.FAILURE));
-        monitors.add(getRollingCountForEvent("rollingCountFallbackEmit", metrics, HystrixRollingNumberEvent.FALLBACK_EMIT));
-        monitors.add(getRollingCountForEvent("rollingCountFallbackFailure", metrics, HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        monitors.add(getRollingCountForEvent("rollingCountFallbackRejection", metrics, HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        monitors.add(getRollingCountForEvent("rollingCountFallbackSuccess", metrics, HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        monitors.add(getRollingCountForEvent("rollingCountResponsesFromCache", metrics, HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-        monitors.add(getRollingCountForEvent("rollingCountSemaphoreRejected", metrics, HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        monitors.add(getRollingCountForEvent("rollingCountShortCircuited", metrics, HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        monitors.add(getRollingCountForEvent("rollingCountSuccess", metrics, HystrixRollingNumberEvent.SUCCESS));
-        monitors.add(getRollingCountForEvent("rollingCountThreadPoolRejected", metrics, HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        monitors.add(getRollingCountForEvent("rollingCountTimeout", metrics, HystrixRollingNumberEvent.TIMEOUT));
+        monitors.add(safelyGetRollingMonitor("rollingCountBadRequests", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.BAD_REQUEST;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountCollapsedRequests", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.COLLAPSED;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountEmit", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.EMIT;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountExceptionsThrown", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.EXCEPTION_THROWN;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountFailure", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FAILURE;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountFallbackEmit", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_EMIT;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountFallbackFailure", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_FAILURE;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountFallbackMissing", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_MISSING;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountFallbackRejection", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_REJECTION;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountFallbackSuccess", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.FALLBACK_SUCCESS;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountResponsesFromCache", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.RESPONSE_FROM_CACHE;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountSemaphoreRejected", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.SEMAPHORE_REJECTED;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountShortCircuited", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.SHORT_CIRCUITED;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountSuccess", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.SUCCESS;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountThreadPoolRejected", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.THREAD_POOL_REJECTED;
+            }
+        }));
+        monitors.add(safelyGetRollingMonitor("rollingCountTimeout", new Func0<HystrixEventType>() {
+            @Override
+            public HystrixEventType call() {
+                return HystrixEventType.TIMEOUT;
+            }
+        }));
 
-        // the number of executionSemaphorePermits in use right now 
-        monitors.add(new GaugeMetric(MonitorConfig.builder("executionSemaphorePermitsInUse").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getCurrentConcurrentExecutionCount();
-            }
-        });
+        // the number of executionSemaphorePermits in use right now
+        monitors.add(getCurrentValueMonitor("executionSemaphorePermitsInUse", currentConcurrentExecutionCountThunk));
 
-        // error percentage derived from current metrics 
-        monitors.add(new GaugeMetric(MonitorConfig.builder("errorPercentage").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getHealthCounts().getErrorPercentage();
-            }
-        });
+        // error percentage derived from current metrics
+        monitors.add(getCurrentValueMonitor("errorPercentage", errorPercentageThunk));
 
-        // latency metrics
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_mean").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimeMean();
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_5").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(5);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_25").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(25);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_50").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(50);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_75").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(75);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_90").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(90);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_99").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(99);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyExecute_percentile_995").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getExecutionTimePercentile(99.5);
-            }
-        });
+        // execution latency metrics
+        monitors.add(getExecutionLatencyMeanMonitor("latencyExecute_mean"));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_5", 5));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_25", 25));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_50", 50));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_75", 75));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_90", 90));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_99", 99));
+        monitors.add(getExecutionLatencyPercentileMonitor("latencyExecute_percentile_995", 99.5));
 
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_mean").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimeMean();
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_5").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(5);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_25").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(25);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_50").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(50);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_75").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(75);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_90").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(90);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_99").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(99);
-            }
-        });
-        monitors.add(new GaugeMetric(MonitorConfig.builder("latencyTotal_percentile_995").build()) {
-            @Override
-            public Number getValue() {
-                return metrics.getTotalTimePercentile(99.5);
-            }
-        });
+        // total latency metrics
+        monitors.add(getTotalLatencyMeanMonitor("latencyTotal_mean"));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_5", 5));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_25", 25));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_50", 50));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_75", 75));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_90", 90));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_99", 99));
+        monitors.add(getTotalLatencyPercentileMonitor("latencyTotal_percentile_995", 99.5));
 
         // group
         monitors.add(new InformationalMetric<String>(MonitorConfig.builder("commandGroup").build()) {

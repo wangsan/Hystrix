@@ -17,6 +17,7 @@ package com.netflix.hystrix.contrib.javanica.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
+import java.lang.annotation.Inherited;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
@@ -27,6 +28,7 @@ import java.lang.annotation.Target;
  */
 @Target({ElementType.METHOD})
 @Retention(RetentionPolicy.RUNTIME)
+@Inherited
 @Documented
 public @interface HystrixCommand {
 
@@ -98,10 +100,26 @@ public @interface HystrixCommand {
     HystrixProperty[] threadPoolProperties() default {};
 
     /**
-     * Defines exceptions which should be ignored and wrapped to throw in HystrixBadRequestException.
+     * Defines exceptions which should be ignored.
+     * Optionally these can be wrapped in HystrixRuntimeException if raiseHystrixExceptions contains RUNTIME_EXCEPTION.
      *
      * @return exceptions to ignore
      */
     Class<? extends Throwable>[] ignoreExceptions() default {};
+
+    /**
+     * Specifies the mode that should be used to execute hystrix observable command.
+     * For more information see {@link ObservableExecutionMode}.
+     *
+     * @return observable execution mode
+     */
+    ObservableExecutionMode observableExecutionMode() default ObservableExecutionMode.EAGER;
+
+    /**
+     * When includes RUNTIME_EXCEPTION, any exceptions that are not ignored are wrapped in HystrixRuntimeException.
+     *
+     * @return exceptions to wrap
+     */
+    HystrixException[] raiseHystrixExceptions() default {};
 }
 

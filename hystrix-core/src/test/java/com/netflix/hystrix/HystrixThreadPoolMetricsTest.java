@@ -15,6 +15,7 @@
  */
 package com.netflix.hystrix;
 
+import com.netflix.hystrix.metric.consumer.RollingThreadPoolEventCounterStream;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -24,45 +25,50 @@ import static org.junit.Assert.assertEquals;
 
 public class HystrixThreadPoolMetricsTest {
 
-	@Before
-	public void resetAll() {
-		HystrixThreadPoolMetrics.reset();
-	}
+    private static final HystrixCommandGroupKey groupKey = HystrixCommandGroupKey.Factory.asKey("HystrixThreadPoolMetrics-UnitTest");
+    private static final HystrixThreadPoolKey tpKey = HystrixThreadPoolKey.Factory.asKey("HystrixThreadPoolMetrics-ThreadPool");
 
-	@Test
-	public void shouldYieldNoExecutedTasksOnStartup() throws Exception {
-		//given
-		final Collection<HystrixThreadPoolMetrics> instances = HystrixThreadPoolMetrics.getInstances();
+    @Before
+    public void resetAll() {
+        HystrixThreadPoolMetrics.reset();
+    }
 
-		//then
-		assertEquals(0, instances.size());
+    @Test
+    public void shouldYieldNoExecutedTasksOnStartup() throws Exception {
+        //given
+        final Collection<HystrixThreadPoolMetrics> instances = HystrixThreadPoolMetrics.getInstances();
 
-	}
-	@Test
-	public void shouldReturnOneExecutedTask() throws Exception {
-		//given
-		final Collection<HystrixThreadPoolMetrics> instances = HystrixThreadPoolMetrics.getInstances();
+        //then
+        assertEquals(0, instances.size());
 
-		//when
-		new NoOpHystrixCommand().execute();
+    }
+    @Test
+    public void shouldReturnOneExecutedTask() throws Exception {
+        //given
+        RollingThreadPoolEventCounterStream.getInstance(tpKey, 10, 100).startCachingStreamValuesIfUnstarted();
 
-		//then
-		assertEquals(1, instances.size());
-		assertEquals(1, instances.iterator().next().getRollingCountThreadsExecuted());
-	}
+        new NoOpHystrixCommand().execute();
+        Thread.sleep(100);
 
-	private static class NoOpHystrixCommand extends HystrixCommand<Void> {
-		public NoOpHystrixCommand() {
-			super(
-					Setter.withGroupKey(
-							HystrixCommandGroupKey.Factory.asKey("HystrixThreadPoolMetrics-UnitTest")));
-		}
+        final Collection<HystrixThreadPoolMetrics> instances = HystrixThreadPoolMetrics.getInstances();
 
-		@Override
-		protected Void run() throws Exception {
-			return null;
-		}
-	}
+        //then
+        assertEquals(1, instances.size());
+        HystrixThreadPoolMetrics metrics = instances.iterator().next();
+        assertEquals(1, instances.iterator().next().getRollingCountThreadsExecuted());
+    }
 
+    private static class NoOpHystrixCommand extends HystrixCommand<Void> {
+        public NoOpHystrixCommand() {
+            super(Setter.withGroupKey(groupKey)
+                    .andThreadPoolKey(tpKey)
+                    .andThreadPoolPropertiesDefaults(HystrixThreadPoolProperties.Setter().withMetricsRollingStatisticalWindowInMilliseconds(100)));
+        }
 
+        @Override
+        protected Void run() throws Exception {
+            System.out.println("Run in thread : " + Thread.currentThread().getName());
+            return null;
+        }
+    }
 }

@@ -15,40 +15,7 @@
  */
 package com.netflix.hystrix;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-
-import java.io.IOException;
-import java.util.Iterator;
-import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-
-import com.netflix.hystrix.strategy.executionhook.HystrixCommandExecutionHook;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
-
-import rx.Observable;
-import rx.Observer;
-import rx.Scheduler;
-import rx.functions.Action1;
-import rx.functions.Func0;
-import rx.observers.TestSubscriber;
-
+import com.hystrix.junit.HystrixRequestContextRule;
 import com.netflix.config.ConfigurationManager;
 import com.netflix.hystrix.AbstractCommand.TryableSemaphore;
 import com.netflix.hystrix.AbstractCommand.TryableSemaphoreActual;
@@ -60,25 +27,49 @@ import com.netflix.hystrix.strategy.HystrixPlugins;
 import com.netflix.hystrix.strategy.concurrency.HystrixContextRunnable;
 import com.netflix.hystrix.strategy.concurrency.HystrixContextScheduler;
 import com.netflix.hystrix.strategy.concurrency.HystrixRequestContext;
+import com.netflix.hystrix.strategy.executionhook.HystrixCommandExecutionHook;
 import com.netflix.hystrix.strategy.properties.HystrixProperty;
-import com.netflix.hystrix.util.HystrixRollingNumberEvent;
+import org.junit.After;
+import org.junit.Rule;
+import org.junit.Test;
+import rx.Observable;
+import rx.Observer;
+import rx.Scheduler;
+import rx.Subscriber;
+import rx.Subscription;
+import rx.functions.Action0;
+import rx.functions.Action1;
+import rx.functions.Func0;
+import rx.functions.Func1;
+import rx.functions.Func2;
+import rx.observers.TestSubscriber;
+import rx.schedulers.Schedulers;
 
-public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCommand<?>> {
+import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
-    @Before
-    public void prepareForTest() {
-        /* we must call this to simulate a new request lifecycle running and clearing caches */
-        HystrixRequestContext.initializeContext();
-    }
+import static org.junit.Assert.*;
+
+public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCommand<Integer>> {
+    @Rule
+    public HystrixRequestContextRule ctx = new HystrixRequestContextRule();
 
     @After
     public void cleanup() {
-        // instead of storing the reference from initialize we'll just get the current state and shutdown
-        if (HystrixRequestContext.getContextForCurrentThread() != null) {
-            // it could have been set NULL by the test
-            HystrixRequestContext.getContextForCurrentThread().shutdown();
-        }
-
         // force properties to be clean as well
         ConfigurationManager.getConfigInstance().clear();
 
@@ -93,40 +84,18 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionSuccess() {
-        try {
-            TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.execute());
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
+        assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.execute());
 
-            assertEquals(null, command.getFailedExecutionException());
+        assertEquals(null, command.getFailedExecutionException());
+        assertNull(command.getExecutionException());
+        assertTrue(command.getExecutionTimeInMilliseconds() > -1);
+        assertTrue(command.isSuccessfulExecution());
 
-            assertTrue(command.getExecutionTimeInMilliseconds() > -1);
-            assertTrue(command.isSuccessfulExecution());
-
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-            assertEquals(0, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
-            assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
-            assertSaneHystrixRequestLog(1);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception.");
-        }
+        assertCommandExecutionEvents(command, HystrixEventType.SUCCESS);
+        assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
+        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+        assertSaneHystrixRequestLog(1);
     }
 
     /**
@@ -134,7 +103,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionMultipleTimes() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
         assertFalse(command.isExecutionComplete());
         // first should succeed
         assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.execute());
@@ -142,25 +111,20 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertTrue(command.isExecutedInThread());
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isSuccessfulExecution());
+        assertNull(command.getExecutionException());
+
         try {
             // second should fail
             command.execute();
             fail("we should not allow this ... it breaks the state of request logs");
-        } catch (IllegalStateException e) {
+        } catch (HystrixRuntimeException e) {
             e.printStackTrace();
             // we want to get here
         }
 
-        try {
-            // queue should also fail
-            command.queue();
-            fail("we should not allow this ... it breaks the state of request logs");
-        } catch (IllegalStateException e) {
-            e.printStackTrace();
-            // we want to get here
-        }
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
         assertSaneHystrixRequestLog(1);
+        assertCommandExecutionEvents(command, HystrixEventType.SUCCESS);
     }
 
     /**
@@ -168,7 +132,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionHystrixFailureWithNoFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.HYSTRIX_FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.HYSTRIX_FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
         try {
             command.execute();
             fail("we shouldn't get here");
@@ -176,33 +140,12 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             e.printStackTrace();
             assertNotNull(e.getFallbackException());
             assertNotNull(e.getImplementingClass());
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should always get an HystrixRuntimeException when an error occurs.");
         }
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -211,7 +154,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionFailureWithNoFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
         try {
             command.execute();
             fail("we shouldn't get here");
@@ -219,31 +162,13 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             e.printStackTrace();
             assertNotNull(e.getFallbackException());
             assertNotNull(e.getImplementingClass());
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should always get an HystrixRuntimeException when an error occurs.");
         }
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -252,35 +177,14 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionFailureWithFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
-        try {
-            assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.execute());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
-
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
+        assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.execute());
         assertEquals("Execution Failure for TestHystrixCommand", command.getFailedExecutionException().getMessage());
-
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -289,7 +193,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionFailureWithFallbackFailure() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.FAILURE);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.FAILURE);
         try {
             command.execute();
             fail("we shouldn't get here");
@@ -302,23 +206,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_FAILURE);
+        assertNotNull(command.getExecutionException());
 
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -326,36 +217,15 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test a successful command execution (asynchronously).
      */
     @Test
-    public void testQueueSuccess() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
-                new SuccessfulTestCommand();
-        try {
-            Future<?> future = command.queue();
-            assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, future.get());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception.");
-        }
-
+    public void testQueueSuccess() throws Exception {
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
+        Future<Integer> future = command.queue();
+        assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, future.get());
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isSuccessfulExecution());
-
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.SUCCESS);
+        assertNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -364,7 +234,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testQueueKnownFailureWithNoFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.HYSTRIX_FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.HYSTRIX_FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
         try {
             command.queue().get();
             fail("we shouldn't get here");
@@ -382,23 +252,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -407,7 +263,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testQueueUnknownFailureWithNoFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
         try {
             command.queue().get();
             fail("we shouldn't get here");
@@ -424,23 +280,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -449,10 +291,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testQueueFailureWithFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
-                new KnownFailureTestCommandWithFallback(new TestCircuitBreaker());
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
         try {
-            Future<?> future = command.queue();
+            Future<Integer> future = command.queue();
             assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, future.get());
         } catch (Exception e) {
             e.printStackTrace();
@@ -461,23 +302,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -486,7 +313,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testQueueFailureWithFallbackFailure() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.FAILURE);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, AbstractTestHystrixCommand.FallbackResult.FAILURE);
         try {
             command.queue().get();
             fail("we shouldn't get here");
@@ -502,23 +329,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_FAILURE);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -527,40 +340,15 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testObserveSuccess() {
-        try {
-            TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.observe().toBlocking().single());
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-
-            assertEquals(null, command.getFailedExecutionException());
-
-            assertTrue(command.getExecutionTimeInMilliseconds() > -1);
-            assertTrue(command.isSuccessfulExecution());
-
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-            assertEquals(0, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
-            assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
-            assertSaneHystrixRequestLog(1);
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception.");
-        }
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
+        assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.observe().toBlocking().single());
+        assertEquals(null, command.getFailedExecutionException());
+        assertTrue(command.getExecutionTimeInMilliseconds() > -1);
+        assertTrue(command.isSuccessfulExecution());
+        assertCommandExecutionEvents(command, HystrixEventType.SUCCESS);
+        assertNull(command.getExecutionException());
+        assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
+        assertSaneHystrixRequestLog(1);
     }
 
     /**
@@ -721,125 +509,6 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     /**
-     * Test that the circuit-breaker will 'trip' and prevent command execution on subsequent calls.
-     */
-    @Test
-    public void testCircuitBreakerTripsAfterFailures() {
-        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
-        /* fail 3 times and then it should trip the circuit and stop executing */
-        // failure 1
-        TestHystrixCommand<?> attempt1 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-        attempt1.execute();
-        assertTrue(attempt1.isResponseFromFallback());
-        assertFalse(attempt1.isCircuitBreakerOpen());
-        assertFalse(attempt1.isResponseShortCircuited());
-
-        // failure 2
-        TestHystrixCommand<?> attempt2 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-        attempt2.execute();
-        assertTrue(attempt2.isResponseFromFallback());
-        assertFalse(attempt2.isCircuitBreakerOpen());
-        assertFalse(attempt2.isResponseShortCircuited());
-
-        // failure 3
-        TestHystrixCommand<?> attempt3 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-        attempt3.execute();
-        assertTrue(attempt3.isResponseFromFallback());
-        assertFalse(attempt3.isResponseShortCircuited());
-        // it should now be 'open' and prevent further executions
-        assertTrue(attempt3.isCircuitBreakerOpen());
-
-        // attempt 4
-        TestHystrixCommand<?> attempt4 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-        attempt4.execute();
-        assertTrue(attempt4.isResponseFromFallback());
-        // this should now be true as the response will be short-circuited
-        assertTrue(attempt4.isResponseShortCircuited());
-        // this should remain open
-        assertTrue(attempt4.isCircuitBreakerOpen());
-
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(4, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
-        assertSaneHystrixRequestLog(4);
-    }
-
-    /**
-     * Test that the circuit-breaker will 'trip' and prevent command execution on subsequent calls.
-     */
-    @Test
-    public void testCircuitBreakerTripsAfterFailuresViaQueue() {
-        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
-        try {
-            /* fail 3 times and then it should trip the circuit and stop executing */
-            // failure 1
-            TestHystrixCommand<?> attempt1 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-            attempt1.queue().get();
-            assertTrue(attempt1.isResponseFromFallback());
-            assertFalse(attempt1.isCircuitBreakerOpen());
-            assertFalse(attempt1.isResponseShortCircuited());
-
-            // failure 2
-            TestHystrixCommand<?> attempt2 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-            attempt2.queue().get();
-            assertTrue(attempt2.isResponseFromFallback());
-            assertFalse(attempt2.isCircuitBreakerOpen());
-            assertFalse(attempt2.isResponseShortCircuited());
-
-            // failure 3
-            TestHystrixCommand<?> attempt3 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-            attempt3.queue().get();
-            assertTrue(attempt3.isResponseFromFallback());
-            assertFalse(attempt3.isResponseShortCircuited());
-            // it should now be 'open' and prevent further executions
-            assertTrue(attempt3.isCircuitBreakerOpen());
-
-            // attempt 4
-            TestHystrixCommand<?> attempt4 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
-            attempt4.queue().get();
-            assertTrue(attempt4.isResponseFromFallback());
-            // this should now be true as the response will be short-circuited
-            assertTrue(attempt4.isResponseShortCircuited());
-            // this should remain open
-            assertTrue(attempt4.isCircuitBreakerOpen());
-
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-            assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-            assertEquals(4, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-            assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-            assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
-            assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
-            assertSaneHystrixRequestLog(4);
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received fallbacks.");
-        }
-    }
-
-    /**
      * Test that the circuit-breaker is shared across HystrixCommand objects with the same CommandKey.
      * <p>
      * This will test HystrixCommand objects with a single circuit-breaker (as if each injected with same CommandKey)
@@ -847,32 +516,33 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Multiple HystrixCommand objects with the same dependency use the same circuit-breaker.
      */
     @Test
-    public void testCircuitBreakerAcrossMultipleCommandsButSameCircuitBreaker() {
-        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+    public void testCircuitBreakerAcrossMultipleCommandsButSameCircuitBreaker() throws InterruptedException {
+        HystrixCommandKey key = HystrixCommandKey.Factory.asKey("SharedCircuitBreaker");
+        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker(key);
         /* fail 3 times and then it should trip the circuit and stop executing */
         // failure 1
-        TestHystrixCommand<?> attempt1 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
+        TestHystrixCommand<Integer> attempt1 = getSharedCircuitBreakerCommand(key, ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker);
+        System.out.println("COMMAND KEY (from cmd): " + attempt1.commandKey.name());
         attempt1.execute();
+        Thread.sleep(100);
         assertTrue(attempt1.isResponseFromFallback());
         assertFalse(attempt1.isCircuitBreakerOpen());
         assertFalse(attempt1.isResponseShortCircuited());
 
         // failure 2 with a different command, same circuit breaker
-        TestHystrixCommand<?> attempt2 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, circuitBreaker);
-        try {
-            attempt2.execute();
-        } catch (Exception e) {
-            // ignore ... this doesn't have a fallback so will throw an exception
-        }
+        TestHystrixCommand<Integer> attempt2 = getSharedCircuitBreakerCommand(key, ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker);
+        attempt2.execute();
+        Thread.sleep(100);
         assertTrue(attempt2.isFailedExecution());
-        assertFalse(attempt2.isResponseFromFallback()); // false because no fallback
+        assertTrue(attempt2.isResponseFromFallback());
         assertFalse(attempt2.isCircuitBreakerOpen());
         assertFalse(attempt2.isResponseShortCircuited());
 
         // failure 3 of the Hystrix, 2nd for this particular HystrixCommand
-        TestHystrixCommand<?> attempt3 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
+        TestHystrixCommand<Integer> attempt3 = getSharedCircuitBreakerCommand(key, ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker);
         attempt3.execute();
-        assertTrue(attempt2.isFailedExecution());
+        Thread.sleep(100);
+        assertTrue(attempt3.isFailedExecution());
         assertTrue(attempt3.isResponseFromFallback());
         assertFalse(attempt3.isResponseShortCircuited());
 
@@ -881,112 +551,20 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertTrue(attempt3.isCircuitBreakerOpen());
 
         // attempt 4
-        TestHystrixCommand<?> attempt4 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker);
+        TestHystrixCommand<Integer> attempt4 = getSharedCircuitBreakerCommand(key, ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker);
         attempt4.execute();
+        Thread.sleep(100);
         assertTrue(attempt4.isResponseFromFallback());
         // this should now be true as the response will be short-circuited
         assertTrue(attempt4.isResponseShortCircuited());
         // this should remain open
         assertTrue(attempt4.isCircuitBreakerOpen());
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(4);
-    }
-
-    /**
-     * Test that the circuit-breaker is different between HystrixCommand objects with a different Hystrix.
-     */
-    @Test
-    public void testCircuitBreakerAcrossMultipleCommandsAndDifferentDependency() {
-        TestCircuitBreaker circuitBreaker_one = new TestCircuitBreaker();
-        TestCircuitBreaker circuitBreaker_two = new TestCircuitBreaker();
-        /* fail 3 times, twice on one Hystrix, once on a different Hystrix ... circuit-breaker should NOT open */
-
-        // failure 1
-        TestHystrixCommand<?> attempt1 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker_one);
-        attempt1.execute();
-        assertTrue(attempt1.isResponseFromFallback());
-        assertFalse(attempt1.isCircuitBreakerOpen());
-        assertFalse(attempt1.isResponseShortCircuited());
-
-        // failure 2 with a different HystrixCommand implementation and different Hystrix
-        TestHystrixCommand<?> attempt2 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker_two);
-        attempt2.execute();
-        assertTrue(attempt2.isResponseFromFallback());
-        assertFalse(attempt2.isCircuitBreakerOpen());
-        assertFalse(attempt2.isResponseShortCircuited());
-
-        // failure 3 but only 2nd of the Hystrix.ONE
-        TestHystrixCommand<?> attempt3 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker_one);
-        attempt3.execute();
-        assertTrue(attempt3.isResponseFromFallback());
-        assertFalse(attempt3.isResponseShortCircuited());
-
-        // it should remain 'closed' since we have only had 2 failures on Hystrix.ONE
-        assertFalse(attempt3.isCircuitBreakerOpen());
-
-        // this one should also remain closed as it only had 1 failure for Hystrix.TWO
-        assertFalse(attempt2.isCircuitBreakerOpen());
-
-        // attempt 4 (3rd attempt for Hystrix.ONE)
-        TestHystrixCommand<?> attempt4 = getSharedCircuitBreakerCommand(ExecutionIsolationStrategy.THREAD, circuitBreaker_one);
-        attempt4.execute();
-        // this should NOW flip to true as this is the 3rd failure for Hystrix.ONE
-        assertTrue(attempt3.isCircuitBreakerOpen());
-        assertTrue(attempt3.isResponseFromFallback());
-        assertFalse(attempt3.isResponseShortCircuited());
-
-        // Hystrix.TWO should still remain closed
-        assertFalse(attempt2.isCircuitBreakerOpen());
-
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(3, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(3, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker_one.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker_one.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(0, circuitBreaker_one.metrics.getCurrentConcurrentExecutionCount());
-
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker_two.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker_two.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(0, circuitBreaker_two.metrics.getCurrentConcurrentExecutionCount());
-
-        assertSaneHystrixRequestLog(4);
+        assertCommandExecutionEvents(attempt1, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(attempt2, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(attempt3, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(attempt4, HystrixEventType.SHORT_CIRCUITED, HystrixEventType.FALLBACK_SUCCESS);
     }
 
     /**
@@ -994,32 +572,13 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionSuccessWithCircuitBreakerDisabled() {
-        TestHystrixCommand<?> command = getCircuitBreakerDisabledCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
-        try {
-            assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.execute());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception.");
-        }
+        TestHystrixCommand<Integer> command = getCircuitBreakerDisabledCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
+        assertEquals(FlexibleTestHystrixCommand.EXECUTE_VALUE, command.execute());
 
-        // we'll still get metrics ... just not the circuit breaker opening/closing
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
+        // we'll still get metrics ... just not the circuit breaker opening/closing
+        assertCommandExecutionEvents(command, HystrixEventType.SUCCESS);
     }
 
     /**
@@ -1027,7 +586,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionTimeoutWithNoFallback() {
-        TestHystrixCommand<?> command = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
+        TestHystrixCommand<Integer> command = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
         try {
             command.execute();
             fail("we shouldn't get here");
@@ -1050,23 +609,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertTrue(command.isResponseTimedOut());
         assertFalse(command.isResponseFromFallback());
         assertFalse(command.isResponseRejected());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1075,36 +620,17 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionTimeoutWithFallback() {
-        TestHystrixCommand<?> command = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
-        try {
-            assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.execute());
-            // the time should be 50+ since we timeout at 50ms
-            assertTrue("Execution Time is: " + command.getExecutionTimeInMilliseconds(), command.getExecutionTimeInMilliseconds() >= 50);
-            assertFalse(command.isCircuitBreakerOpen());
-            assertFalse(command.isResponseShortCircuited());
-            assertTrue(command.isResponseTimedOut());
-            assertTrue(command.isResponseFromFallback());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        TestHystrixCommand<Integer> command = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
+        assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.execute());
+        // the time should be 50+ since we timeout at 50ms
+        assertTrue("Execution Time is: " + command.getExecutionTimeInMilliseconds(), command.getExecutionTimeInMilliseconds() >= 50);
+        assertFalse(command.isCircuitBreakerOpen());
+        assertFalse(command.isResponseShortCircuited());
+        assertTrue(command.isResponseTimedOut());
+        assertTrue(command.isResponseFromFallback());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1113,7 +639,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testExecutionTimeoutFallbackFailure() {
-        TestHystrixCommand<?> command = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.FAILURE, 50);
+        TestHystrixCommand<Integer> command = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.FAILURE, 50);
         try {
             command.execute();
             fail("we shouldn't get here");
@@ -1129,24 +655,13 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
                 fail("the exception should be HystrixRuntimeException");
             }
         }
+
+        assertNotNull(command.getExecutionException());
+
         // the time should be 50+ since we timeout at 50ms
         assertTrue("Execution Time is: " + command.getExecutionTimeInMilliseconds(), command.getExecutionTimeInMilliseconds() >= 50);
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_FAILURE);
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1154,51 +669,25 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test that the command finishing AFTER a timeout (because thread continues in background) does not register a SUCCESS
      */
     @Test
-    public void testCountersOnExecutionTimeout() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
-        try {
-            command.execute();
+    public void testCountersOnExecutionTimeout() throws Exception {
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
+        command.execute();
 
-            /* wait long enough for the command to have finished */
-            Thread.sleep(200);
+        /* wait long enough for the command to have finished */
+        Thread.sleep(200);
 
-            /* response should still be the same as 'testCircuitBreakerOnExecutionTimeout' */
-            assertTrue(command.isResponseFromFallback());
-            assertFalse(command.isCircuitBreakerOpen());
-            assertFalse(command.isResponseShortCircuited());
+        /* response should still be the same as 'testCircuitBreakerOnExecutionTimeout' */
+        assertTrue(command.isResponseFromFallback());
+        assertFalse(command.isCircuitBreakerOpen());
+        assertFalse(command.isResponseShortCircuited());
 
-            assertTrue(command.getExecutionTimeInMilliseconds() > -1);
-            assertTrue(command.isResponseTimedOut());
-            assertFalse(command.isSuccessfulExecution());
+        assertTrue(command.getExecutionTimeInMilliseconds() > -1);
+        assertTrue(command.isResponseTimedOut());
+        assertFalse(command.isSuccessfulExecution());
+        assertNotNull(command.getExecutionException());
 
-            /* failure and timeout count should be the same as 'testCircuitBreakerOnExecutionTimeout' */
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-
-            /* we should NOT have a 'success' counter */
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS);
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1210,7 +699,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testQueuedExecutionTimeoutWithNoFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
         try {
             command.queue().get();
             fail("we shouldn't get here");
@@ -1230,23 +719,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isResponseTimedOut());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1257,31 +732,12 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * indefinitely by skipping the timeout protection of the execute() command.
      */
     @Test
-    public void testQueuedExecutionTimeoutWithFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
-        try {
-            assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.queue().get());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+    public void testQueuedExecutionTimeoutWithFallback() throws Exception {
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
+        assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.queue().get());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1293,7 +749,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testQueuedExecutionTimeoutFallbackFailure() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.FAILURE, 50);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.FAILURE, 50);
         try {
             command.queue().get();
             fail("we shouldn't get here");
@@ -1310,22 +766,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
         }
 
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_FAILURE);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1337,7 +780,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testObservedExecutionTimeoutWithNoFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
         try {
             command.observe().toBlocking().single();
             fail("we shouldn't get here");
@@ -1357,23 +800,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isResponseTimedOut());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1384,31 +813,13 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * indefinitely by skipping the timeout protection of the execute() command.
      */
     @Test
-    public void testObservedExecutionTimeoutWithFallback() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
-        try {
-            assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.observe().toBlocking().single());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
+    public void testObservedExecutionTimeoutWithFallback() throws Exception {
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
+        assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.observe().toBlocking().single());
 
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -1420,7 +831,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testObservedExecutionTimeoutFallbackFailure() {
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.FAILURE, 50);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.FAILURE, 50);
         try {
             command.observe().toBlocking().single();
             fail("we shouldn't get here");
@@ -1437,71 +848,31 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
         }
 
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_FAILURE);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
-    /**
-     * Test that the circuit-breaker counts a command execution timeout as a 'timeout' and not just failure.
-     */
     @Test
     public void testShortCircuitFallbackCounter() {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker().setForceShortCircuit(true);
-        try {
-            new KnownFailureTestCommandWithFallback(circuitBreaker).execute();
+        KnownFailureTestCommandWithFallback command1 = new KnownFailureTestCommandWithFallback(circuitBreaker);
+        command1.execute();
 
-            assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
+        KnownFailureTestCommandWithFallback command2 = new KnownFailureTestCommandWithFallback(circuitBreaker);
+        command2.execute();
 
-            KnownFailureTestCommandWithFallback command = new KnownFailureTestCommandWithFallback(circuitBreaker);
-            command.execute();
-            assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
+        // will be -1 because it never attempted execution
+        assertTrue(command1.getExecutionTimeInMilliseconds() == -1);
+        assertTrue(command1.isResponseShortCircuited());
+        assertFalse(command1.isResponseTimedOut());
+        assertNotNull(command1.getExecutionException());
 
-            // will be -1 because it never attempted execution
-            assertTrue(command.getExecutionTimeInMilliseconds() == -1);
-            assertTrue(command.isResponseShortCircuited());
-            assertFalse(command.isResponseTimedOut());
 
-            // because it was short-circuited to a fallback we don't count an error
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
-
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SHORT_CIRCUITED, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SHORT_CIRCUITED, HystrixEventType.FALLBACK_SUCCESS);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -1511,7 +882,8 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * We specifically want to protect against developers getting random thread exceptions and instead just correctly receiving HystrixRuntimeException when no fallback exists.
      */
     @Test
-    public void testRejectedThreadWithNoFallback() {
+    public void testRejectedThreadWithNoFallback() throws Exception {
+        HystrixCommandKey key = HystrixCommandKey.Factory.asKey("Rejection-NoFallback");
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SingleThreadedPoolWithQueue pool = new SingleThreadedPoolWithQueue(1);
         // fill up the queue
@@ -1530,25 +902,23 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         });
 
         Future<Boolean> f = null;
-        TestCommandRejection command = null;
+        TestCommandRejection command1 = null;
+        TestCommandRejection command2 = null;
         try {
-            f = new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED).queue();
-            command = new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
-            command.queue();
+            command1 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
+            f = command1.queue();
+            command2 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
+            command2.queue();
             fail("we shouldn't get here");
         } catch (Exception e) {
             e.printStackTrace();
-            System.out.println("command.getExecutionTimeInMilliseconds(): " + command.getExecutionTimeInMilliseconds());
+            System.out.println("command.getExecutionTimeInMilliseconds(): " + command2.getExecutionTimeInMilliseconds());
             // will be -1 because it never attempted execution
-            assertTrue(command.getExecutionTimeInMilliseconds() == -1);
-            assertTrue(command.isResponseRejected());
-            assertFalse(command.isResponseShortCircuited());
-            assertFalse(command.isResponseTimedOut());
+            assertTrue(command2.isResponseRejected());
+            assertFalse(command2.isResponseShortCircuited());
+            assertFalse(command2.isResponseTimedOut());
+            assertNotNull(command2.getExecutionException());
 
-            assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
             if (e instanceof HystrixRuntimeException && e.getCause() instanceof RejectedExecutionException) {
                 HystrixRuntimeException de = (HystrixRuntimeException) e;
                 assertNotNull(de.getFallbackException());
@@ -1561,29 +931,11 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
         }
 
-        try {
-            f.get();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("The first one should succeed.");
-        }
+        f.get();
 
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(50, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_MISSING);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -1593,65 +945,36 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * We specifically want to protect against developers getting random thread exceptions and instead just correctly receives a fallback.
      */
     @Test
-    public void testRejectedThreadWithFallback() {
+    public void testRejectedThreadWithFallback() throws InterruptedException {
+        HystrixCommandKey key = HystrixCommandKey.Factory.asKey("Rejection-Fallback");
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SingleThreadedPoolWithQueue pool = new SingleThreadedPoolWithQueue(1);
-        // fill up the queue
-        pool.queue.add(new Runnable() {
 
-            @Override
-            public void run() {
-                System.out.println("**** queue filler1 ****");
-                try {
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }
+        //command 1 will execute in threadpool (passing through the queue)
+        //command 2 will execute after spending time in the queue (after command1 completes)
+        //command 3 will get rejected, since it finds pool and queue both full
+        TestCommandRejection command1 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_SUCCESS);
+        TestCommandRejection command2 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_SUCCESS);
+        TestCommandRejection command3 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_SUCCESS);
 
-        });
+        Observable<Boolean> result1 = command1.observe();
+        Observable<Boolean> result2 = command2.observe();
 
-        try {
-            TestCommandRejection command1 = new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_SUCCESS);
-            command1.queue();
-            TestCommandRejection command2 = new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_SUCCESS);
-            assertEquals(false, command2.queue().get());
-            assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertFalse(command1.isResponseRejected());
-            assertFalse(command1.isResponseFromFallback());
-            assertTrue(command2.isResponseRejected());
-            assertTrue(command2.isResponseFromFallback());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We should have received a response from the fallback.");
-        }
+        Thread.sleep(100);
+        //command3 should find queue filled, and get rejected
+        assertFalse(command3.execute());
+        assertTrue(command3.isResponseRejected());
+        assertFalse(command1.isResponseRejected());
+        assertFalse(command2.isResponseRejected());
+        assertTrue(command3.isResponseFromFallback());
+        assertNotNull(command3.getExecutionException());
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
+        assertCommandExecutionEvents(command3, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_SUCCESS);
+        Observable.merge(result1, result2).toList().toBlocking().single(); //await the 2 latent commands
 
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(1, circuitBreaker.metrics.getCurrentConcurrentExecutionCount()); //pool-filler still going
-
-        //This is a case where we knowingly walk away from an executing Hystrix thread (the pool-filler).  It should have an in-flight status ("Executed").  You should avoid this in a production environment
-        HystrixRequestLog requestLog = HystrixRequestLog.getCurrentRequest();
-        assertEquals(2, requestLog.getAllExecutedCommands().size());
-        assertTrue(requestLog.getExecutedCommandsAsString().contains("Executed"));
-        Iterator<HystrixInvokableInfo<?>> commandIterator = requestLog.getAllExecutedCommands().iterator();
-        assertEquals(0, commandIterator.next().getExecutionEvents().size()); //still in flight and unresolved
-        assertEquals(2, commandIterator.next().getExecutionEvents().size()); //THREAD_POOL_REJECTED , FALLBACK_SUCCESS
+        assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
+        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+        assertSaneHystrixRequestLog(3);
     }
 
     /**
@@ -1660,31 +983,23 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * We specifically want to protect against developers getting random thread exceptions and instead just correctly receives an HystrixRuntimeException.
      */
     @Test
-    public void testRejectedThreadWithFallbackFailure() {
+    public void testRejectedThreadWithFallbackFailure() throws ExecutionException, InterruptedException {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SingleThreadedPoolWithQueue pool = new SingleThreadedPoolWithQueue(1);
-        // fill up the queue
-        pool.queue.add(new Runnable() {
+        HystrixCommandKey key = HystrixCommandKey.Factory.asKey("Rejection-A");
 
-            @Override
-            public void run() {
-                System.out.println("**** queue filler1 ****");
-                try {
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }
-
-        });
-
+        TestCommandRejection command1 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_FAILURE); //this should pass through the queue and sit in the pool
+        TestCommandRejection command2 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_SUCCESS); //this should sit in the queue
+        TestCommandRejection command3 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_FAILURE); //this should observe full queue and get rejected
+        Future<Boolean> f1 = null;
+        Future<Boolean> f2 = null;
         try {
-            new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_FAILURE).queue();
-            assertEquals(false, new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_FAILURE).queue().get());
+            f1 = command1.queue();
+            f2 = command2.queue();
+            assertEquals(false, command3.queue().get()); //should get thread-pool rejected
             fail("we shouldn't get here");
         } catch (Exception e) {
             e.printStackTrace();
-            assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
             if (e instanceof HystrixRuntimeException && e.getCause() instanceof RejectedExecutionException) {
                 HystrixRuntimeException de = (HystrixRuntimeException) e;
                 assertNotNull(de.getFallbackException());
@@ -1697,29 +1012,22 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(1, circuitBreaker.metrics.getCurrentConcurrentExecutionCount()); //pool-filler still going
-
-        //This is a case where we knowingly walk away from an executing Hystrix thread (the pool-filler).  It should have an in-flight status ("Executed").  You should avoid this in a production environment
+        assertCommandExecutionEvents(command1); //still in-flight, no events yet
+        assertCommandExecutionEvents(command2); //still in-flight, no events yet
+        assertCommandExecutionEvents(command3, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_FAILURE);
+        int numInFlight = circuitBreaker.metrics.getCurrentConcurrentExecutionCount();
+        assertTrue("Expected at most 1 in flight but got : " + numInFlight, numInFlight <= 1); //pool-filler still going
+        //This is a case where we knowingly walk away from executing Hystrix threads. They should have an in-flight status ("Executed").  You should avoid this in a production environment
         HystrixRequestLog requestLog = HystrixRequestLog.getCurrentRequest();
-        assertEquals(2, requestLog.getAllExecutedCommands().size());
+        assertEquals(3, requestLog.getAllExecutedCommands().size());
         assertTrue(requestLog.getExecutedCommandsAsString().contains("Executed"));
-        Iterator<HystrixInvokableInfo<?>> commandIterator = requestLog.getAllExecutedCommands().iterator();
-        assertEquals(0, commandIterator.next().getExecutionEvents().size()); //still in flight and unresolved
-        assertEquals(2, commandIterator.next().getExecutionEvents().size()); //THREAD_POOL_REJECTED , FALLBACK_SUCCESS
+
+        //block on the outstanding work, so we don't inadvertently affect any other tests
+        long startTime = System.currentTimeMillis();
+        f1.get();
+        f2.get();
+        assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
+        System.out.println("Time blocked : " + (System.currentTimeMillis() - startTime));
     }
 
     /**
@@ -1731,6 +1039,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testRejectedThreadUsingQueueSize() {
+        HystrixCommandKey key = HystrixCommandKey.Factory.asKey("Rejection-B");
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SingleThreadedPoolWithQueue pool = new SingleThreadedPoolWithQueue(10, 1);
         // put 1 item in the queue
@@ -1751,22 +1060,19 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         });
 
 
-        TestCommandRejection command = null;
+        TestCommandRejection command = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
         try {
             // this should fail as we already have 1 in the queue
-            command = new TestCommandRejection(circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
             command.queue();
             fail("we shouldn't get here");
         } catch (Exception e) {
             e.printStackTrace();
 
-            // will be -1 because it never attempted execution
-            assertTrue(command.getExecutionTimeInMilliseconds() == -1);
             assertTrue(command.isResponseRejected());
             assertFalse(command.isResponseShortCircuited());
             assertFalse(command.isResponseTimedOut());
+            assertNotNull(command.getExecutionException());
 
-            assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
             if (e instanceof HystrixRuntimeException && e.getCause() instanceof RejectedExecutionException) {
                 HystrixRuntimeException de = (HystrixRuntimeException) e;
                 assertNotNull(de.getFallbackException());
@@ -1779,210 +1085,87 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_MISSING);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
-    }
-
-    /**
-     * If it has been sitting in the queue, it should not execute if timed out by the time it hits the queue.
-     */
-    @Test
-    public void testTimedOutCommandDoesNotExecute() {
-        SingleThreadedPoolWithQueue pool = new SingleThreadedPoolWithQueue(5);
-
-        TestCircuitBreaker s1 = new TestCircuitBreaker();
-        TestCircuitBreaker s2 = new TestCircuitBreaker();
-
-        // execution will take 100ms, thread pool has a 600ms timeout
-        CommandWithCustomThreadPool c1 = new CommandWithCustomThreadPool(s1, pool, 500, HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(600));
-        // execution will take 200ms, thread pool has a 20ms timeout
-        CommandWithCustomThreadPool c2 = new CommandWithCustomThreadPool(s2, pool, 200, HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(20));
-        // queue up c1 first
-        Future<Boolean> c1f = c1.queue();
-        // now queue up c2 and wait on it
-        boolean receivedException = false;
-        try {
-            c2.queue().get();
-        } catch (Exception e) {
-            // we expect to get an exception here
-            receivedException = true;
-        }
-
-        if (!receivedException) {
-            fail("We expect to receive an exception for c2 as it's supposed to timeout.");
-        }
-
-        // c1 will complete after 100ms
-        try {
-            c1f.get();
-        } catch (Exception e1) {
-            e1.printStackTrace();
-            fail("we should not have failed while getting c1");
-        }
-        assertTrue("c1 is expected to executed but didn't", c1.didExecute);
-
-        // c2 will timeout after 20 ms ... we'll wait longer than the 200ms time to make sure
-        // the thread doesn't keep running in the background and execute
-        try {
-            Thread.sleep(400);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to sleep");
-        }
-        assertFalse("c2 is not expected to execute, but did", c2.didExecute);
-
-        assertEquals(1, s1.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, s1.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, s1.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(0, s1.metrics.getCurrentConcurrentExecutionCount());
-
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, s2.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, s2.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, s2.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, s2.metrics.getHealthCounts().getErrorPercentage());
-        assertEquals(0, s2.metrics.getCurrentConcurrentExecutionCount());
-
-        assertSaneHystrixRequestLog(2);
     }
 
     @Test
     public void testDisabledTimeoutWorks() {
         CommandWithDisabledTimeout cmd = new CommandWithDisabledTimeout(100, 900);
-        boolean result = false;
-        try {
-            result = cmd.execute();
-        } catch (Throwable ex) {
-            ex.printStackTrace();
-            fail("should not fail");
-        }
+        boolean result = cmd.execute();
 
         assertEquals(true, result);
         assertFalse(cmd.isResponseTimedOut());
+        assertNull(cmd.getExecutionException());
         System.out.println("CMD : " + cmd.currentRequestLog.getExecutedCommandsAsString());
-        assertTrue(cmd.executionResult.getExecutionTime() >= 900);
+        assertTrue(cmd.executionResult.getExecutionLatency() >= 900);
+        assertCommandExecutionEvents(cmd, HystrixEventType.SUCCESS);
     }
 
     @Test
-    public void testFallbackSemaphore() {
+    public void testFallbackSemaphore() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         // single thread should work
-        try {
-            boolean result = new TestSemaphoreCommandWithSlowFallback(circuitBreaker, 1, 200).queue().get();
-            assertTrue(result);
-        } catch (Exception e) {
-            // we shouldn't fail on this one
-            throw new RuntimeException(e);
-        }
+        TestSemaphoreCommandWithSlowFallback command1 = new TestSemaphoreCommandWithSlowFallback(circuitBreaker, 1, 200);
+        boolean result = command1.queue().get();
+        assertTrue(result);
 
         // 2 threads, the second should be rejected by the fallback semaphore
         boolean exceptionReceived = false;
-        Future<Boolean> result = null;
+        Future<Boolean> result2 = null;
+        TestSemaphoreCommandWithSlowFallback command2 = null;
+        TestSemaphoreCommandWithSlowFallback command3 = null;
         try {
             System.out.println("c2 start: " + System.currentTimeMillis());
-            result = new TestSemaphoreCommandWithSlowFallback(circuitBreaker, 1, 800).queue();
+            command2 = new TestSemaphoreCommandWithSlowFallback(circuitBreaker, 1, 800);
+            result2 = command2.queue();
             System.out.println("c2 after queue: " + System.currentTimeMillis());
             // make sure that thread gets a chance to run before queuing the next one
             Thread.sleep(50);
             System.out.println("c3 start: " + System.currentTimeMillis());
-            Future<Boolean> result2 = new TestSemaphoreCommandWithSlowFallback(circuitBreaker, 1, 200).queue();
+            command3 = new TestSemaphoreCommandWithSlowFallback(circuitBreaker, 1, 200);
+            Future<Boolean> result3 = command3.queue();
             System.out.println("c3 after queue: " + System.currentTimeMillis());
-            result2.get();
+            result3.get();
         } catch (Exception e) {
             e.printStackTrace();
             exceptionReceived = true;
         }
 
-        try {
-            assertTrue(result.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertTrue(result2.get());
 
         if (!exceptionReceived) {
             fail("We expected an exception on the 2nd get");
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        // TestSemaphoreCommandWithSlowFallback always fails so all 3 should show failure
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        // the 1st thread executes single-threaded and gets a fallback, the next 2 are concurrent so only 1 of them is permitted by the fallback semaphore so 1 is rejected
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        // whenever a fallback_rejection occurs it is also a fallback_failure
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        // we should not have rejected any via the "execution semaphore" but instead via the "fallback semaphore"
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        // the rest should not be involved in this test
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_REJECTION);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
     @Test
-    public void testExecutionSemaphoreWithQueue() {
+    public void testExecutionSemaphoreWithQueue() throws Exception {
         final TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         // single thread should work
-        try {
-            boolean result = new TestSemaphoreCommand(circuitBreaker, 1, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED).queue().get();
-            assertTrue(result);
-        } catch (Exception e) {
-            // we shouldn't fail on this one
-            throw new RuntimeException(e);
-        }
+        TestSemaphoreCommand command1 = new TestSemaphoreCommand(circuitBreaker, 1, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
+        boolean result = command1.queue().get();
+        assertTrue(result);
 
         final AtomicBoolean exceptionReceived = new AtomicBoolean();
 
         final TryableSemaphore semaphore =
                 new TryableSemaphoreActual(HystrixProperty.Factory.asProperty(1));
 
-        Runnable r = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
+        final TestSemaphoreCommand command2 = new TestSemaphoreCommand(circuitBreaker, semaphore, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
+        Runnable r2 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
 
             @Override
             public void run() {
                 try {
-                    new TestSemaphoreCommand(circuitBreaker, semaphore, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED).queue().get();
+                    command2.queue().get();
                 } catch (Exception e) {
                     e.printStackTrace();
                     exceptionReceived.set(true);
@@ -1990,60 +1173,51 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
 
         });
-        // 2 threads, the second should be rejected by the semaphore
-        Thread t1 = new Thread(r);
-        Thread t2 = new Thread(r);
+        final TestSemaphoreCommand command3 = new TestSemaphoreCommand(circuitBreaker, semaphore, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
+        Runnable r3 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
 
-        t1.start();
+            @Override
+            public void run() {
+                try {
+                    command3.queue().get();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    exceptionReceived.set(true);
+                }
+            }
+
+        });
+
+        // 2 threads, the second should be rejected by the semaphore
+        Thread t2 = new Thread(r2);
+        Thread t3 = new Thread(r3);
+
         t2.start();
-        try {
-            t1.join();
-            t2.join();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("failed waiting on threads");
-        }
+        // make sure that t2 gets a chance to run before queuing the next one
+        Thread.sleep(50);
+        t3.start();
+        t2.join();
+        t3.join();
 
         if (!exceptionReceived.get()) {
             fail("We expected an exception on the 2nd get");
         }
 
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        // we don't have a fallback so threw an exception when rejected
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        // not a failure as the command never executed so can't fail
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        // no fallback failure as there isn't a fallback implemented
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        // we should have rejected via semaphore
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        // the rest should not be involved in this test
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SEMAPHORE_REJECTED, HystrixEventType.FALLBACK_MISSING);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
     @Test
-    public void testExecutionSemaphoreWithExecution() {
+    public void testExecutionSemaphoreWithExecution() throws Exception {
         final TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         // single thread should work
-        try {
-            TestSemaphoreCommand command = new TestSemaphoreCommand(circuitBreaker, 1, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
-            boolean result = command.execute();
-            assertFalse(command.isExecutedInThread());
-            assertTrue(result);
-        } catch (Exception e) {
-            // we shouldn't fail on this one
-            throw new RuntimeException(e);
-        }
+        TestSemaphoreCommand command1 = new TestSemaphoreCommand(circuitBreaker, 1, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
+        boolean result = command1.execute();
+        assertFalse(command1.isExecutedInThread());
+        assertTrue(result);
 
         final ArrayBlockingQueue<Boolean> results = new ArrayBlockingQueue<Boolean>(2);
 
@@ -2052,12 +1226,13 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         final TryableSemaphore semaphore =
                 new TryableSemaphoreActual(HystrixProperty.Factory.asProperty(1));
 
-        Runnable r = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
+        final TestSemaphoreCommand command2 = new TestSemaphoreCommand(circuitBreaker, semaphore, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
+        Runnable r2 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
 
             @Override
             public void run() {
                 try {
-                    results.add(new TestSemaphoreCommand(circuitBreaker, semaphore, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED).execute());
+                    results.add(command2.execute());
                 } catch (Exception e) {
                     e.printStackTrace();
                     exceptionReceived.set(true);
@@ -2065,19 +1240,31 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
 
         });
-        // 2 threads, the second should be rejected by the semaphore
-        Thread t1 = new Thread(r);
-        Thread t2 = new Thread(r);
+        final TestSemaphoreCommand command3 = new TestSemaphoreCommand(circuitBreaker, semaphore, 200, TestSemaphoreCommand.RESULT_SUCCESS, TestSemaphoreCommand.FALLBACK_NOT_IMPLEMENTED);
+        Runnable r3 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
 
-        t1.start();
+            @Override
+            public void run() {
+                try {
+                    results.add(command3.execute());
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    exceptionReceived.set(true);
+                }
+            }
+
+        });
+
+        // 2 threads, the second should be rejected by the semaphore
+        Thread t2 = new Thread(r2);
+        Thread t3 = new Thread(r3);
+
         t2.start();
-        try {
-            t1.join();
-            t2.join();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("failed waiting on threads");
-        }
+        // make sure that t2 gets a chance to run before queuing the next one
+        Thread.sleep(50);
+        t3.start();
+        t2.join();
+        t3.join();
 
         if (!exceptionReceived.get()) {
             fail("We expected an exception on the 2nd get");
@@ -2088,42 +1275,42 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         // should contain only a true result
         assertTrue(results.contains(Boolean.TRUE));
         assertFalse(results.contains(Boolean.FALSE));
-
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        // no failure ... we throw an exception because of rejection but the command does not fail execution
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        // there is no fallback implemented so no failure can occur on it
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        // we rejected via semaphore
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        // the rest should not be involved in this test
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SEMAPHORE_REJECTED, HystrixEventType.FALLBACK_MISSING);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
     @Test
-    public void testRejectedExecutionSemaphoreWithFallbackViaExecute() {
+    public void testRejectedExecutionSemaphoreWithFallbackViaExecute() throws Exception {
         final TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         final ArrayBlockingQueue<Boolean> results = new ArrayBlockingQueue<Boolean>(2);
 
         final AtomicBoolean exceptionReceived = new AtomicBoolean();
 
-        Runnable r = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
+        final TestSemaphoreCommandWithFallback command1 = new TestSemaphoreCommandWithFallback(circuitBreaker, 1, 200, false);
+        Runnable r1 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
 
             @Override
             public void run() {
                 try {
-                    results.add(new TestSemaphoreCommandWithFallback(circuitBreaker, 1, 200, false).execute());
+                    results.add(command1.execute());
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    exceptionReceived.set(true);
+                }
+            }
+
+        });
+
+        final TestSemaphoreCommandWithFallback command2 = new TestSemaphoreCommandWithFallback(circuitBreaker, 1, 200, false);
+        Runnable r2 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    results.add(command2.execute());
                 } catch (Exception e) {
                     e.printStackTrace();
                     exceptionReceived.set(true);
@@ -2133,18 +1320,15 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         });
 
         // 2 threads, the second should be rejected by the semaphore and return fallback
-        Thread t1 = new Thread(r);
-        Thread t2 = new Thread(r);
+        Thread t1 = new Thread(r1);
+        Thread t2 = new Thread(r2);
 
         t1.start();
+        // make sure that t2 gets a chance to run before queuing the next one
+        Thread.sleep(50);
         t2.start();
-        try {
-            t1.join();
-            t2.join();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("failed waiting on threads");
-        }
+        t1.join();
+        t2.join();
 
         if (exceptionReceived.get()) {
             fail("We should have received a fallback response");
@@ -2155,41 +1339,41 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         // should contain both a true and false result
         assertTrue(results.contains(Boolean.TRUE));
         assertTrue(results.contains(Boolean.FALSE));
-
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        // the rest should not be involved in this test
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SEMAPHORE_REJECTED, HystrixEventType.FALLBACK_SUCCESS);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
-        System.out.println("**** DONE");
-
         assertSaneHystrixRequestLog(2);
     }
 
     @Test
-    public void testRejectedExecutionSemaphoreWithFallbackViaObserve() {
+    public void testRejectedExecutionSemaphoreWithFallbackViaObserve() throws Exception {
         final TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         final ArrayBlockingQueue<Observable<Boolean>> results = new ArrayBlockingQueue<Observable<Boolean>>(2);
 
         final AtomicBoolean exceptionReceived = new AtomicBoolean();
 
-        Runnable r = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
+        final TestSemaphoreCommandWithFallback command1 = new TestSemaphoreCommandWithFallback(circuitBreaker, 1, 200, false);
+        Runnable r1 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
 
             @Override
             public void run() {
                 try {
-                    results.add(new TestSemaphoreCommandWithFallback(circuitBreaker, 1, 200, false).observe());
+                    results.add(command1.observe());
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    exceptionReceived.set(true);
+                }
+            }
+
+        });
+
+        final TestSemaphoreCommandWithFallback command2 = new TestSemaphoreCommandWithFallback(circuitBreaker, 1, 200, false);
+        Runnable r2 = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
+
+            @Override
+            public void run() {
+                try {
+                    results.add(command2.observe());
                 } catch (Exception e) {
                     e.printStackTrace();
                     exceptionReceived.set(true);
@@ -2199,18 +1383,15 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         });
 
         // 2 threads, the second should be rejected by the semaphore and return fallback
-        Thread t1 = new Thread(r);
-        Thread t2 = new Thread(r);
+        Thread t1 = new Thread(r1);
+        Thread t2 = new Thread(r2);
 
         t1.start();
+        // make sure that t2 gets a chance to run before queuing the next one
+        Thread.sleep(50);
         t2.start();
-        try {
-            t1.join();
-            t2.join();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("failed waiting on threads");
-        }
+        t1.join();
+        t2.join();
 
         if (exceptionReceived.get()) {
             fail("We should have received a fallback response");
@@ -2223,25 +1404,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         // should contain both a true and false result
         assertTrue(blockingList.contains(Boolean.TRUE));
         assertTrue(blockingList.contains(Boolean.FALSE));
-
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        // the rest should not be involved in this test
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SEMAPHORE_REJECTED, HystrixEventType.FALLBACK_SUCCESS);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
-        System.out.println("**** DONE");
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -2249,7 +1414,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Tests that semaphores are counted separately for commands with unique keys
      */
     @Test
-    public void testSemaphorePermitsInUse() {
+    public void testSemaphorePermitsInUse() throws Exception {
         final TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
 
         // this semaphore will be shared across multiple command instances
@@ -2268,7 +1433,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         final Runnable sharedSemaphoreRunnable = new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
             public void run() {
                 try {
-                    new LatchedSemaphoreCommand(circuitBreaker, sharedSemaphore, startLatch, sharedLatch).execute();
+                    new LatchedSemaphoreCommand("Command-Shared", circuitBreaker, sharedSemaphore, startLatch, sharedLatch).execute();
                 } catch (Exception e) {
                     startLatch.countDown();
                     e.printStackTrace();
@@ -2294,7 +1459,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         final Thread isolatedThread = new Thread(new HystrixContextRunnable(HystrixPlugins.getInstance().getConcurrencyStrategy(), new Runnable() {
             public void run() {
                 try {
-                    new LatchedSemaphoreCommand(circuitBreaker, isolatedSemaphore, startLatch, isolatedLatch).execute();
+                    new LatchedSemaphoreCommand("Command-Isolated", circuitBreaker, isolatedSemaphore, startLatch, isolatedLatch).execute();
                 } catch (Exception e) {
                     startLatch.countDown();
                     e.printStackTrace();
@@ -2313,11 +1478,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         isolatedThread.start();
 
         // waits until all commands have started
-        try {
-            startLatch.await(1000, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
+        startLatch.await(1000, TimeUnit.MILLISECONDS);
 
         // verifies that all semaphores are in use
         assertEquals("immediately after command start, all shared semaphores should be in-use",
@@ -2329,17 +1490,14 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         sharedLatch.countDown();
         isolatedLatch.countDown();
 
-        try {
-            for (int i = 0; i < sharedThreadCount; i++) {
-                sharedSemaphoreThreads[i].join();
-            }
-            isolatedThread.join();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("failed waiting on threads");
+        for (int i = 0; i < sharedThreadCount; i++) {
+            sharedSemaphoreThreads[i].join();
         }
+        isolatedThread.join();
 
         // verifies no permits in use after finishing threads
+        System.out.println("REQLOG : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+
         assertEquals("after all threads have finished, no shared semaphores should be in-use", 0, sharedSemaphore.getNumberOfPermitsUsed());
         assertEquals("after all threads have finished, isolated semaphore not in-use", 0, isolatedSemaphore.getNumberOfPermitsUsed());
 
@@ -2353,62 +1511,39 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testDynamicOwner() {
-        try {
-            TestHystrixCommand<Boolean> command = new DynamicOwnerTestCommand(InspectableBuilder.CommandGroupForUnitTest.OWNER_ONE);
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(true, command.execute());
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception.");
-        }
+        TestHystrixCommand<Boolean> command = new DynamicOwnerTestCommand(InspectableBuilder.CommandGroupForUnitTest.OWNER_ONE);
+        assertEquals(true, command.execute());
+        assertCommandExecutionEvents(command, HystrixEventType.SUCCESS);
     }
 
     /**
      * Test a successful command execution.
      */
-    @Test
+    @Test(expected = IllegalStateException.class)
     public void testDynamicOwnerFails() {
-        try {
-            TestHystrixCommand<Boolean> command = new DynamicOwnerTestCommand(null);
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(true, command.execute());
-            fail("we should have thrown an exception as we need an owner");
-        } catch (Exception e) {
-            // success if we get here
-        }
+        TestHystrixCommand<Boolean> command = new DynamicOwnerTestCommand(null);
+        assertEquals(true, command.execute());
     }
 
     /**
      * Test that HystrixCommandKey can be passed in dynamically.
      */
     @Test
-    public void testDynamicKey() {
-        try {
-            DynamicOwnerAndKeyTestCommand command1 = new DynamicOwnerAndKeyTestCommand(InspectableBuilder.CommandGroupForUnitTest.OWNER_ONE, InspectableBuilder.CommandKeyForUnitTest.KEY_ONE);
-            assertEquals(true, command1.execute());
-            DynamicOwnerAndKeyTestCommand command2 = new DynamicOwnerAndKeyTestCommand(InspectableBuilder.CommandGroupForUnitTest.OWNER_ONE, InspectableBuilder.CommandKeyForUnitTest.KEY_TWO);
-            assertEquals(true, command2.execute());
+    public void testDynamicKey() throws Exception {
+        DynamicOwnerAndKeyTestCommand command1 = new DynamicOwnerAndKeyTestCommand(InspectableBuilder.CommandGroupForUnitTest.OWNER_ONE, InspectableBuilder.CommandKeyForUnitTest.KEY_ONE);
+        assertEquals(true, command1.execute());
+        DynamicOwnerAndKeyTestCommand command2 = new DynamicOwnerAndKeyTestCommand(InspectableBuilder.CommandGroupForUnitTest.OWNER_ONE, InspectableBuilder.CommandKeyForUnitTest.KEY_TWO);
+        assertEquals(true, command2.execute());
 
-            // 2 different circuit breakers should be created
-            assertNotSame(command1.getCircuitBreaker(), command2.getCircuitBreaker());
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception.");
-        }
+        // 2 different circuit breakers should be created
+        assertNotSame(command1.getCircuitBreaker(), command2.getCircuitBreaker());
     }
 
     /**
      * Test Request scoped caching of commands so that a 2nd duplicate call doesn't execute but returns the previous Future
      */
     @Test
-    public void testRequestCache1() {
+    public void testRequestCache1() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SuccessfulCacheableCommand<String> command1 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "A");
         SuccessfulCacheableCommand<String> command2 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "A");
@@ -2418,46 +1553,18 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f1 = command1.queue();
         Future<String> f2 = command2.queue();
 
-        try {
-            assertEquals("A", f1.get());
-            assertEquals("A", f2.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f1.get());
+        assertEquals("A", f2.get());
 
         assertTrue(command1.executed);
         // the second one should not have executed as it should have received the cached value instead
         assertFalse(command2.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
         assertTrue(command1.getExecutionTimeInMilliseconds() > -1);
         assertFalse(command1.isResponseFromCache());
-
-        // the execution log for command2 should show it came from cache
-        assertEquals(2, command2.getExecutionEvents().size()); // it will include the SUCCESS + RESPONSE_FROM_CACHE
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.RESPONSE_FROM_CACHE));
-        assertTrue(command2.getExecutionTimeInMilliseconds() == -1);
         assertTrue(command2.isResponseFromCache());
-
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -2465,7 +1572,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test Request scoped caching doesn't prevent different ones from executing
      */
     @Test
-    public void testRequestCache2() {
+    public void testRequestCache2() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SuccessfulCacheableCommand<String> command1 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "A");
         SuccessfulCacheableCommand<String> command2 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "B");
@@ -2475,43 +1582,20 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f1 = command1.queue();
         Future<String> f2 = command2.queue();
 
-        try {
-            assertEquals("A", f1.get());
-            assertEquals("B", f2.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f1.get());
+        assertEquals("B", f2.get());
 
         assertTrue(command1.executed);
         // both should execute as they are different
         assertTrue(command2.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
         assertTrue(command2.getExecutionTimeInMilliseconds() > -1);
         assertFalse(command2.isResponseFromCache());
-
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertNull(command1.getExecutionException());
+        assertFalse(command2.isResponseFromCache());
+        assertNull(command2.getExecutionException());
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -2519,7 +1603,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test Request scoped caching with a mixture of commands
      */
     @Test
-    public void testRequestCache3() {
+    public void testRequestCache3() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SuccessfulCacheableCommand<String> command1 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "A");
         SuccessfulCacheableCommand<String> command2 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "B");
@@ -2530,51 +1614,21 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f1 = command1.queue();
         Future<String> f2 = command2.queue();
         Future<String> f3 = command3.queue();
-
-        try {
-            assertEquals("A", f1.get());
-            assertEquals("B", f2.get());
-            assertEquals("A", f3.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f1.get());
+        assertEquals("B", f2.get());
+        assertEquals("A", f3.get());
 
         assertTrue(command1.executed);
         // both should execute as they are different
         assertTrue(command2.executed);
         // but the 3rd should come from cache
         assertFalse(command3.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command3 should show it came from cache
-        assertEquals(2, command3.getExecutionEvents().size()); // it will include the SUCCESS + RESPONSE_FROM_CACHE
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.RESPONSE_FROM_CACHE));
-        assertTrue(command3.getExecutionTimeInMilliseconds() == -1);
         assertTrue(command3.isResponseFromCache());
-
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
+        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
         assertSaneHystrixRequestLog(3);
     }
 
@@ -2582,7 +1636,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test Request scoped caching of commands so that a 2nd duplicate call doesn't execute but returns the previous Future
      */
     @Test
-    public void testRequestCacheWithSlowExecution() {
+    public void testRequestCacheWithSlowExecution() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SlowCacheableCommand command1 = new SlowCacheableCommand(circuitBreaker, "A", 200);
         SlowCacheableCommand command2 = new SlowCacheableCommand(circuitBreaker, "A", 100);
@@ -2594,15 +1648,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f3 = command3.queue();
         Future<String> f4 = command4.queue();
 
-        try {
-            assertEquals("A", f2.get());
-            assertEquals("A", f3.get());
-            assertEquals("A", f4.get());
-
-            assertEquals("A", f1.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f2.get());
+        assertEquals("A", f3.get());
+        assertEquals("A", f4.get());
+        assertEquals("A", f1.get());
 
         assertTrue(command1.executed);
         // the second one should not have executed as it should have received the cached value instead
@@ -2610,42 +1659,20 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertFalse(command3.executed);
         assertFalse(command4.executed);
 
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
         assertTrue(command1.getExecutionTimeInMilliseconds() > -1);
         assertFalse(command1.isResponseFromCache());
-
-        // the execution log for command2 should show it came from cache
-        assertEquals(2, command2.getExecutionEvents().size()); // it will include the SUCCESS + RESPONSE_FROM_CACHE
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.RESPONSE_FROM_CACHE));
         assertTrue(command2.getExecutionTimeInMilliseconds() == -1);
         assertTrue(command2.isResponseFromCache());
-
         assertTrue(command3.isResponseFromCache());
         assertTrue(command3.getExecutionTimeInMilliseconds() == -1);
         assertTrue(command4.isResponseFromCache());
         assertTrue(command4.getExecutionTimeInMilliseconds() == -1);
-
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(command4, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(4);
-
         System.out.println("HystrixRequestLog: " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
     }
 
@@ -2653,7 +1680,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test Request scoped caching with a mixture of commands
      */
     @Test
-    public void testNoRequestCache3() {
+    public void testNoRequestCache3() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SuccessfulCacheableCommand<String> command1 = new SuccessfulCacheableCommand<String>(circuitBreaker, false, "A");
         SuccessfulCacheableCommand<String> command2 = new SuccessfulCacheableCommand<String>(circuitBreaker, false, "B");
@@ -2665,13 +1692,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f2 = command2.queue();
         Future<String> f3 = command3.queue();
 
-        try {
-            assertEquals("A", f1.get());
-            assertEquals("B", f2.get());
-            assertEquals("A", f3.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f1.get());
+        assertEquals("B", f2.get());
+        assertEquals("A", f3.get());
 
         assertTrue(command1.executed);
         // both should execute as they are different
@@ -2679,34 +1702,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         // this should also execute since we disabled the cache
         assertTrue(command3.executed);
 
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command3 should show a SUCCESS
-        assertEquals(1, command3.getExecutionEvents().size());
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
@@ -2714,7 +1713,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test Request scoped caching with a mixture of commands
      */
     @Test
-    public void testRequestCacheViaQueueSemaphore1() {
+    public void testRequestCacheViaQueueSemaphore1() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SuccessfulCacheableCommandViaSemaphore command1 = new SuccessfulCacheableCommandViaSemaphore(circuitBreaker, true, "A");
         SuccessfulCacheableCommandViaSemaphore command2 = new SuccessfulCacheableCommandViaSemaphore(circuitBreaker, true, "B");
@@ -2726,52 +1725,21 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f2 = command2.queue();
         Future<String> f3 = command3.queue();
 
-        try {
-            assertEquals("A", f1.get());
-            assertEquals("B", f2.get());
-            assertEquals("A", f3.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f1.get());
+        assertEquals("B", f2.get());
+        assertEquals("A", f3.get());
 
         assertTrue(command1.executed);
         // both should execute as they are different
         assertTrue(command2.executed);
         // but the 3rd should come from cache
         assertFalse(command3.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command3 should show it comes from cache
-        assertEquals(2, command3.getExecutionEvents().size()); // it will include the SUCCESS + RESPONSE_FROM_CACHE
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.RESPONSE_FROM_CACHE));
-
         assertTrue(command3.isResponseFromCache());
         assertTrue(command3.getExecutionTimeInMilliseconds() == -1);
-
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
@@ -2779,7 +1747,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test Request scoped caching with a mixture of commands
      */
     @Test
-    public void testNoRequestCacheViaQueueSemaphore1() {
+    public void testNoRequestCacheViaQueueSemaphore1() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
         SuccessfulCacheableCommandViaSemaphore command1 = new SuccessfulCacheableCommandViaSemaphore(circuitBreaker, false, "A");
         SuccessfulCacheableCommandViaSemaphore command2 = new SuccessfulCacheableCommandViaSemaphore(circuitBreaker, false, "B");
@@ -2791,48 +1759,19 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         Future<String> f2 = command2.queue();
         Future<String> f3 = command3.queue();
 
-        try {
-            assertEquals("A", f1.get());
-            assertEquals("B", f2.get());
-            assertEquals("A", f3.get());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertEquals("A", f1.get());
+        assertEquals("B", f2.get());
+        assertEquals("A", f3.get());
 
         assertTrue(command1.executed);
         // both should execute as they are different
         assertTrue(command2.executed);
         // this should also execute because caching is disabled
         assertTrue(command3.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command3 should show a SUCCESS
-        assertEquals(1, command3.getExecutionEvents().size());
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
@@ -2861,35 +1800,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertTrue(command2.executed);
         // but the 3rd should come from cache
         assertFalse(command3.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command3 should show it comes from cache
-        assertEquals(2, command3.getExecutionEvents().size()); // it will include the SUCCESS + RESPONSE_FROM_CACHE
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.RESPONSE_FROM_CACHE));
-
-        assertEquals(2, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
@@ -2918,35 +1832,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertTrue(command2.executed);
         // this should also execute because caching is disabled
         assertTrue(command3.executed);
-
-        // the execution log for command1 should show a SUCCESS
-        assertEquals(1, command1.getExecutionEvents().size());
-        assertTrue(command1.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command2 should show a SUCCESS
-        assertEquals(1, command2.getExecutionEvents().size());
-        assertTrue(command2.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        // the execution log for command3 should show a SUCCESS
-        assertEquals(1, command3.getExecutionEvents().size());
-        assertTrue(command3.getExecutionEvents().contains(HystrixEventType.SUCCESS));
-
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(0, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command3, HystrixEventType.SUCCESS);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(3);
     }
 
@@ -2998,81 +1887,49 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             // what we want
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(4, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(4, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(r1, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertCommandExecutionEvents(r2, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertCommandExecutionEvents(r3, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertCommandExecutionEvents(r4, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(4);
     }
 
     @Test
     public void testRequestCacheOnTimeoutCausesNullPointerException() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        RequestCacheNullPointerExceptionCase command1 = new RequestCacheNullPointerExceptionCase(circuitBreaker);
+        RequestCacheNullPointerExceptionCase command2 = new RequestCacheNullPointerExceptionCase(circuitBreaker);
+        RequestCacheNullPointerExceptionCase command3 = new RequestCacheNullPointerExceptionCase(circuitBreaker);
+
         // Expect it to time out - all results should be false
-        assertFalse(new RequestCacheNullPointerExceptionCase(circuitBreaker).execute());
-        assertFalse(new RequestCacheNullPointerExceptionCase(circuitBreaker).execute()); // return from cache #1
-        assertFalse(new RequestCacheNullPointerExceptionCase(circuitBreaker).execute()); // return from cache #2
+        assertFalse(command1.execute());
+        assertFalse(command2.execute()); // return from cache #1
+        assertFalse(command3.execute()); // return from cache #2
         Thread.sleep(500); // timeout on command is set to 200ms
-        Boolean value = new RequestCacheNullPointerExceptionCase(circuitBreaker).execute(); // return from cache #3
+
+        RequestCacheNullPointerExceptionCase command4 = new RequestCacheNullPointerExceptionCase(circuitBreaker);
+        Boolean value = command4.execute(); // return from cache #3
         assertFalse(value);
-        RequestCacheNullPointerExceptionCase c = new RequestCacheNullPointerExceptionCase(circuitBreaker);
-        Future<Boolean> f = c.queue(); // return from cache #4
+        RequestCacheNullPointerExceptionCase command5 = new RequestCacheNullPointerExceptionCase(circuitBreaker);
+        Future<Boolean> f = command5.queue(); // return from cache #4
         // the bug is that we're getting a null Future back, rather than a Future that returns false
         assertNotNull(f);
         assertFalse(f.get());
 
-        assertTrue(c.isResponseFromFallback());
-        assertTrue(c.isResponseTimedOut());
-        assertFalse(c.isFailedExecution());
-        assertFalse(c.isResponseShortCircuited());
+        assertTrue(command5.isResponseFromFallback());
+        assertTrue(command5.isResponseTimedOut());
+        assertFalse(command5.isFailedExecution());
+        assertFalse(command5.isResponseShortCircuited());
+        assertNotNull(command5.getExecutionException());
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(4, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command1, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(command3, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(command4, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(command5, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(5);
-
-        HystrixInvokableInfo<?>[] executeCommands = HystrixRequestLog.getCurrentRequest().getAllExecutedCommands().toArray(new HystrixInvokableInfo<?>[]{});
-
-        System.out.println(":executeCommands[0].getExecutionEvents()" + executeCommands[0].getExecutionEvents());
-        assertEquals(2, executeCommands[0].getExecutionEvents().size());
-        assertTrue(executeCommands[0].getExecutionEvents().contains(HystrixEventType.FALLBACK_SUCCESS));
-        assertTrue(executeCommands[0].getExecutionEvents().contains(HystrixEventType.TIMEOUT));
-        assertTrue(executeCommands[0].getExecutionTimeInMilliseconds() > -1);
-        assertTrue(executeCommands[0].isResponseTimedOut());
-        assertTrue(executeCommands[0].isResponseFromFallback());
-        assertFalse(executeCommands[0].isResponseFromCache());
-
-        assertEquals(3, executeCommands[1].getExecutionEvents().size()); // it will include FALLBACK_SUCCESS/TIMEOUT + RESPONSE_FROM_CACHE
-        assertTrue(executeCommands[1].getExecutionEvents().contains(HystrixEventType.RESPONSE_FROM_CACHE));
-        assertTrue(executeCommands[1].getExecutionTimeInMilliseconds() == -1);
-        assertTrue(executeCommands[1].isResponseFromCache());
-        assertTrue(executeCommands[1].isResponseTimedOut());
-        assertTrue(executeCommands[1].isResponseFromFallback());
     }
 
     @Test
@@ -3123,22 +1980,11 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             // what we want
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(r1, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertCommandExecutionEvents(r2, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(r3, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(r4, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(4);
     }
 
@@ -3194,22 +2040,11 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             // what we want
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(3, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, circuitBreaker.metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(r1, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_MISSING);
+        assertCommandExecutionEvents(r2, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_MISSING, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(r3, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_MISSING, HystrixEventType.RESPONSE_FROM_CACHE);
+        assertCommandExecutionEvents(r4, HystrixEventType.THREAD_POOL_REJECTED, HystrixEventType.FALLBACK_MISSING, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(4);
     }
 
@@ -3217,50 +2052,32 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test that we can do basic execution without a RequestVariable being initialized.
      */
     @Test
-    public void testBasicExecutionWorksWithoutRequestVariable() {
-        try {
-            /* force the RequestVariable to not be initialized */
-            HystrixRequestContext.setContextOnCurrentThread(null);
+    public void testBasicExecutionWorksWithoutRequestVariable() throws Exception {
+        /* force the RequestVariable to not be initialized */
+        HystrixRequestContext.setContextOnCurrentThread(null);
 
-            TestHystrixCommand<Boolean> command = new SuccessfulTestCommand();
-            assertEquals(true, command.execute());
+        TestHystrixCommand<Boolean> command = new SuccessfulTestCommand();
+        assertEquals(true, command.execute());
 
-            TestHystrixCommand<Boolean> command2 = new SuccessfulTestCommand();
-            assertEquals(true, command2.queue().get());
-
-            // we should be able to execute without a RequestVariable if ...
-            // 1) We don't have a cacheKey
-            // 2) We don't ask for the RequestLog
-            // 3) We don't do collapsing
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We received an exception => " + e.getMessage());
-        }
+        TestHystrixCommand<Boolean> command2 = new SuccessfulTestCommand();
+        assertEquals(true, command2.queue().get());
     }
 
     /**
      * Test that if we try and execute a command with a cacheKey without initializing RequestVariable that it gives an error.
      */
-    @Test
-    public void testCacheKeyExecutionRequiresRequestVariable() {
-        try {
-            /* force the RequestVariable to not be initialized */
-            HystrixRequestContext.setContextOnCurrentThread(null);
+    @Test(expected = HystrixRuntimeException.class)
+    public void testCacheKeyExecutionRequiresRequestVariable() throws Exception {
+        /* force the RequestVariable to not be initialized */
+        HystrixRequestContext.setContextOnCurrentThread(null);
 
-            TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
 
-            SuccessfulCacheableCommand command = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "one");
-            assertEquals("one", command.execute());
+        SuccessfulCacheableCommand command = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "one");
+        assertEquals("one", command.execute());
 
-            SuccessfulCacheableCommand command2 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "two");
-            assertEquals("two", command2.queue().get());
-
-            fail("We expect an exception because cacheKey requires RequestVariable.");
-
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        SuccessfulCacheableCommand command2 = new SuccessfulCacheableCommand<String>(circuitBreaker, true, "two");
+        assertEquals("two", command2.queue().get());
     }
 
     /**
@@ -3269,24 +2086,18 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     @Test
     public void testBadRequestExceptionViaExecuteInThread() {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        BadRequestCommand command1 = null;
         try {
-            new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD).execute();
+            command1 = new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD);
+            command1.execute();
             fail("we expect to receive a " + HystrixBadRequestException.class.getSimpleName());
         } catch (HystrixBadRequestException e) {
             // success
             e.printStackTrace();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We expect a " + HystrixBadRequestException.class.getSimpleName() + " but got a " + e.getClass().getSimpleName());
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.BAD_REQUEST);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -3294,30 +2105,25 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test that a BadRequestException can be thrown and not count towards errors and bypasses fallback.
      */
     @Test
-    public void testBadRequestExceptionViaQueueInThread() {
+    public void testBadRequestExceptionViaQueueInThread() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        BadRequestCommand command1 = null;
         try {
-            new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD).queue().get();
+            command1 = new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD);
+            command1.queue().get();
             fail("we expect to receive a " + HystrixBadRequestException.class.getSimpleName());
         } catch (ExecutionException e) {
             e.printStackTrace();
             if (e.getCause() instanceof HystrixBadRequestException) {
-                // success    
+                // success
             } else {
                 fail("We expect a " + HystrixBadRequestException.class.getSimpleName() + " but got a " + e.getClass().getSimpleName());
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail();
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.BAD_REQUEST);
+        assertNotNull(command1.getExecutionException());
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -3325,38 +2131,35 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Test that BadRequestException behavior works the same on a cached response.
      */
     @Test
-    public void testBadRequestExceptionViaQueueInThreadOnResponseFromCache() {
+    public void testBadRequestExceptionViaQueueInThreadOnResponseFromCache() throws Exception {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
 
         // execute once to cache the value
+        BadRequestCommand command1 = null;
         try {
-            new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD).execute();
+            command1 = new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD);
+            command1.execute();
         } catch (Throwable e) {
             // ignore
         }
 
+        BadRequestCommand command2 = null;
         try {
-            new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD).queue().get();
+            command2 = new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD);
+            command2.queue().get();
             fail("we expect to receive a " + HystrixBadRequestException.class.getSimpleName());
         } catch (ExecutionException e) {
             e.printStackTrace();
             if (e.getCause() instanceof HystrixBadRequestException) {
-                // success    
+                // success
             } else {
                 fail("We expect a " + HystrixBadRequestException.class.getSimpleName() + " but got a " + e.getClass().getSimpleName());
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail();
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.BAD_REQUEST);
+        assertCommandExecutionEvents(command2, HystrixEventType.BAD_REQUEST, HystrixEventType.RESPONSE_FROM_CACHE);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -3366,55 +2169,17 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     @Test
     public void testBadRequestExceptionViaExecuteInSemaphore() {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        BadRequestCommand command1 = new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.SEMAPHORE);
         try {
-            new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.SEMAPHORE).execute();
+            command1.execute();
             fail("we expect to receive a " + HystrixBadRequestException.class.getSimpleName());
         } catch (HystrixBadRequestException e) {
             // success
             e.printStackTrace();
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail("We expect a " + HystrixBadRequestException.class.getSimpleName() + " but got a " + e.getClass().getSimpleName());
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command1, HystrixEventType.BAD_REQUEST);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
-        assertSaneHystrixRequestLog(1);
-    }
-
-    /**
-     * Test that a BadRequestException can be thrown and not count towards errors and bypasses fallback.
-     */
-    @Test
-    public void testBadRequestExceptionViaQueueInSemaphore() {
-        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
-        try {
-            new BadRequestCommand(circuitBreaker, ExecutionIsolationStrategy.SEMAPHORE).queue().get();
-            fail("we expect to receive a " + HystrixBadRequestException.class.getSimpleName());
-        } catch (ExecutionException e) {
-            e.printStackTrace();
-            if (e.getCause() instanceof HystrixBadRequestException) {
-                // success    
-            } else {
-                fail("We expect a " + HystrixBadRequestException.class.getSimpleName() + " but got a " + e.getClass().getSimpleName());
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-            fail();
-        }
-
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
-        assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -3436,20 +2201,15 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
     /**
      * Test a java.lang.Error being thrown
-     * 
+     *
      * @throws InterruptedException
      */
     @Test
@@ -3490,24 +2250,17 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertTrue(t.get() instanceof HystrixRuntimeException);
         assertEquals("simulated checked exception message", t.get().getCause().getMessage());
         assertEquals("simulated checked exception message", command.getFailedExecutionException().getMessage());
-
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
     @Test
     public void testSemaphoreExecutionWithTimeout() {
-        //TestHystrixCommand<?> cmd = getLatentCommand(ExecutionIsolationStrategy.SEMAPHORE, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 1000, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 200);
-        TestHystrixCommand<?> cmd = new InterruptibleCommand(new TestCircuitBreaker(), false);
+        TestHystrixCommand<Boolean> cmd = new InterruptibleCommand(new TestCircuitBreaker(), false);
 
         System.out.println("Starting command");
         long timeMillis = System.currentTimeMillis();
@@ -3515,26 +2268,13 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             cmd.execute();
             fail("Should throw");
         } catch (Throwable t) {
+            assertNotNull(cmd.getExecutionException());
+
             System.out.println("Unsuccessful Execution took : " + (System.currentTimeMillis() - timeMillis));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-            assertEquals(1, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-            assertEquals(1, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-            assertEquals(0, cmd.metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-            assertEquals(100, cmd.metrics.getHealthCounts().getErrorPercentage());
+            assertCommandExecutionEvents(cmd, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
             assertEquals(0, cmd.metrics.getCurrentConcurrentExecutionCount());
-
             assertSaneHystrixRequestLog(1);
         }
-
     }
 
     /**
@@ -3542,7 +2282,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      */
     @Test
     public void testRecoverableErrorWithNoFallbackThrowsError() {
-        TestHystrixCommand<?> command = getRecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+        TestHystrixCommand<Integer> command = getRecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
         try {
             command.execute();
             fail("we expect to receive a " + Error.class.getSimpleName());
@@ -3557,43 +2297,28 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
     @Test
     public void testRecoverableErrorMaskedByFallbackButLogged() {
-        TestHystrixCommand<?> command = getRecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
-        try {
-            assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.execute());
-        } catch (Exception e) {
-            fail("we expect to receive a valid fallback");
-        }
+        TestHystrixCommand<Integer> command = getRecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
+        assertEquals(FlexibleTestHystrixCommand.FALLBACK_VALUE, command.execute());
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
     @Test
     public void testUnrecoverableErrorThrownWithNoFallback() {
-        TestHystrixCommand<?> command = getUnrecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+        TestHystrixCommand<Integer> command = getUnrecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
         try {
             command.execute();
             fail("we expect to receive a " + Error.class.getSimpleName());
@@ -3608,20 +2333,15 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
     @Test //even though fallback is implemented, that logic never fires, as this is an unrecoverable error and should be directly propagated to the caller
     public void testUnrecoverableErrorThrownWithFallback() {
-        TestHystrixCommand<?> command = getUnrecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
+        TestHystrixCommand<Integer> command = getUnrecoverableErrorCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
         try {
             command.execute();
             fail("we expect to receive a " + Error.class.getSimpleName());
@@ -3636,98 +2356,12 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isFailedExecution());
-
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, command.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-
+        assertCommandExecutionEvents(command, HystrixEventType.FAILURE);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
-//    @Test
-//    public void testFallbackRejectionOccursWithLatentFallback() {
-//        int numCommands = 1000;
-//        int semaphoreSize = 600;
-//        List<TestHystrixCommand<?>> cmds = new ArrayList<TestHystrixCommand<?>>();
-//        final AtomicInteger exceptionsSeen = new AtomicInteger(0);
-//        final AtomicInteger fallbacksSeen = new AtomicInteger(0);
-//        final ConcurrentMap<HystrixRuntimeException.FailureType, AtomicInteger> exceptionTypes = new ConcurrentHashMap<HystrixRuntimeException.FailureType, AtomicInteger>();
-//        final CountDownLatch latch = new CountDownLatch(numCommands);
-//
-//        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
-//        HystrixThreadPool largeThreadPool = new HystrixThreadPool.HystrixThreadPoolDefault(HystrixThreadPoolKey.Factory.asKey("LATENT_FALLBACK"), HystrixThreadPoolProperties.Setter.getUnitTestPropertiesBuilder().withCoreSize(numCommands));
-//        TryableSemaphore executionSemaphore = new TryableSemaphoreActual(HystrixProperty.Factory.asProperty(numCommands));
-//        TryableSemaphore fallbackSemaphore = new AbstractCommand.TryableSemaphoreActual(HystrixProperty.Factory.asProperty(semaphoreSize));
-//
-//        /**
-//         * The goal here is for all commands to fail immediately in the run() method, and then hit the fallback path.
-//         * The fallback path should be latent for all commands, and the fallback semaphore should saturate and
-//         * reject some fallbacks from occurring
-//         *
-//         * To accomplish this, I will set
-//         * - the threadpool that commands run in high (so commands don't get rejected by the threadpool),
-//         * - the execution semaphore high (so commands don't get rejected by that semaphore)
-//         * - the falback semaphore lower than the number of commands (so that some get fallback-rejected)
-//         */
-//
-//        for (int i = 0; i < numCommands; i++) {
-//            cmds.add(getFallbackLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 1000, circuitBreaker, largeThreadPool, executionSemaphore, fallbackSemaphore));
-//        }
-//
-//        for (final TestHystrixCommand<?> cmd: cmds) {
-//            final Runnable cmdExecution = new Runnable() {
-//                @Override
-//                public void run() {
-//                    try {
-//                        cmd.execute();
-//                        fallbacksSeen.incrementAndGet();
-//                    } catch (HystrixRuntimeException hre) {
-//                        HystrixRuntimeException.FailureType ft = hre.getFailureType();
-//                        AtomicInteger found = exceptionTypes.get(ft);
-//                        if (found != null) {
-//                            found.incrementAndGet();
-//                        } else {
-//                            exceptionTypes.put(ft, new AtomicInteger(1));
-//                        }
-//                        exceptionsSeen.incrementAndGet();
-//                    } finally {
-//                        latch.countDown();
-//                    }
-//                }
-//            };
-//
-//            new Thread(cmdExecution).start();
-//        }
-//
-//        try {
-//            latch.await(30, TimeUnit.SECONDS);
-//
-//            System.out.println("MAP : " + exceptionTypes);
-//        } catch (InterruptedException ie) {
-//            fail("Interrupted!");
-//        }
-//
-//        System.out.println("NUM EXCEPTIONS : " + exceptionsSeen.get());
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.SUCCESS));
-//        assertEquals(numCommands - semaphoreSize, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-//        assertEquals(numCommands, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.FAILURE));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.BAD_REQUEST));
-//        assertEquals(numCommands - semaphoreSize, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-//        assertEquals(semaphoreSize, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.TIMEOUT));
-//        assertEquals(0, circuitBreaker.metrics.getCumulativeCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-//    }
-//
     static class EventCommand extends HystrixCommand {
         public EventCommand() {
             super(Setter.withGroupKey(HystrixCommandGroupKey.Factory.asKey("eventGroup")).andCommandPropertiesDefaults(new HystrixCommandProperties.Setter().withFallbackIsolationSemaphoreMaxConcurrentRequests(3)));
@@ -3752,29 +2386,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         }
     }
 
-    //if I set fallback semaphore to same as threadpool (10), I set up a race.
-    //instead, I set fallback sempahore to much less (3).  This should guarantee that all fallbacks only happen in the threadpool, and main thread does not block
-    @Test(timeout=5000)
-    public void testFallbackRejection() throws InterruptedException, ExecutionException {
-        for (int i = 0; i < 1000; i++) {
-            EventCommand cmd = new EventCommand();
-
-            try {
-                if (i == 500) {
-                    Thread.sleep(100L);
-                }
-                cmd.queue();
-                System.out.println("queued: " + i);
-            } catch (Exception e) {
-                System.out.println("Fail Fast on queue() : " + cmd.getExecutionEvents());
-
-            }
-        }
-    }
-
     @Test
-    public void testNonBlockingCommandQueueFiresTimeout() { //see https://github.com/Netflix/Hystrix/issues/514
-        final TestHystrixCommand<?> cmd = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
+    public void testNonBlockingCommandQueueFiresTimeout() throws Exception { //see https://github.com/Netflix/Hystrix/issues/514
+        final TestHystrixCommand<Integer> cmd = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 50);
 
         new Thread() {
             @Override
@@ -3783,13 +2397,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             }
         }.start();
 
-        try {
-            Thread.sleep(200);
-            //timeout should occur in 50ms, and underlying thread should run for 500ms
-            //therefore, after 200ms, the command should have finished with a fallback on timeout
-        } catch (InterruptedException ie) {
-            throw new RuntimeException(ie);
-        }
+        Thread.sleep(200);
+        //timeout should occur in 50ms, and underlying thread should run for 500ms
+        //therefore, after 200ms, the command should have finished with a fallback on timeout
 
         assertTrue(cmd.isExecutionComplete());
         assertTrue(cmd.isResponseTimedOut());
@@ -3798,7 +2408,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     @Override
-    protected void assertHooksOnSuccess(Func0<TestHystrixCommand<?>> ctor, Action1<TestHystrixCommand<?>> assertion) {
+    protected void assertHooksOnSuccess(Func0<TestHystrixCommand<Integer>> ctor, Action1<TestHystrixCommand<Integer>> assertion) {
         assertExecute(ctor.call(), assertion, true);
         assertBlockingQueue(ctor.call(), assertion, true);
         assertNonBlockingQueue(ctor.call(), assertion, true, false);
@@ -3807,7 +2417,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     @Override
-    protected void assertHooksOnFailure(Func0<TestHystrixCommand<?>> ctor, Action1<TestHystrixCommand<?>> assertion) {
+    protected void assertHooksOnFailure(Func0<TestHystrixCommand<Integer>> ctor, Action1<TestHystrixCommand<Integer>> assertion) {
         assertExecute(ctor.call(), assertion, false);
         assertBlockingQueue(ctor.call(), assertion, false);
         assertNonBlockingQueue(ctor.call(), assertion, false, false);
@@ -3816,7 +2426,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     @Override
-    protected void assertHooksOnFailure(Func0<TestHystrixCommand<?>> ctor, Action1<TestHystrixCommand<?>> assertion, boolean failFast) {
+    protected void assertHooksOnFailure(Func0<TestHystrixCommand<Integer>> ctor, Action1<TestHystrixCommand<Integer>> assertion, boolean failFast) {
         assertExecute(ctor.call(), assertion, false);
         assertBlockingQueue(ctor.call(), assertion, false);
         assertNonBlockingQueue(ctor.call(), assertion, false, failFast);
@@ -3828,9 +2438,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Run the command via {@link com.netflix.hystrix.HystrixCommand#execute()} and then assert
      * @param command command to run
      * @param assertion assertions to check
-     * @param isSuccess should the command succeed?
+     * @param isSuccess should the command succeedInteger
      */
-    private void assertExecute(TestHystrixCommand<?> command, Action1<TestHystrixCommand<?>> assertion, boolean isSuccess) {
+    private void assertExecute(TestHystrixCommand<Integer> command, Action1<TestHystrixCommand<Integer>> assertion, boolean isSuccess) {
         System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : Running command.execute() and then assertions...");
         if (isSuccess) {
             command.execute();
@@ -3851,9 +2461,9 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * Run the command via {@link com.netflix.hystrix.HystrixCommand#queue()}, immediately block, and then assert
      * @param command command to run
      * @param assertion assertions to check
-     * @param isSuccess should the command succeed?
+     * @param isSuccess should the command succeedInteger
      */
-    private void assertBlockingQueue(TestHystrixCommand<?> command, Action1<TestHystrixCommand<?>> assertion, boolean isSuccess) {
+    private void assertBlockingQueue(TestHystrixCommand<Integer> command, Action1<TestHystrixCommand<Integer>> assertion, boolean isSuccess) {
         System.out.println("Running command.queue(), immediately blocking and then running assertions...");
         if (isSuccess) {
             try {
@@ -3884,11 +2494,11 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
      * When it is finished, assert
      * @param command command to run
      * @param assertion assertions to check
-     * @param isSuccess should the command succeed?
+     * @param isSuccess should the command succeedInteger
      */
-    private void assertNonBlockingQueue(TestHystrixCommand<?> command, Action1<TestHystrixCommand<?>> assertion, boolean isSuccess, boolean failFast) {
+    private void assertNonBlockingQueue(TestHystrixCommand<Integer> command, Action1<TestHystrixCommand<Integer>> assertion, boolean isSuccess, boolean failFast) {
         System.out.println("Running command.queue(), sleeping the test thread until command is complete, and then running assertions...");
-        Future<?> f = null;
+        Future<Integer> f = null;
         if (failFast) {
             try {
                 f = command.queue();
@@ -3964,23 +2574,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         assertEquals("we failed with a simulated issue", commandDisabled.getFailedExecutionException().getMessage());
 
         assertTrue(commandDisabled.isFailedExecution());
-
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(1, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, commandDisabled.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, commandDisabled.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(commandEnabled, HystrixEventType.FAILURE, HystrixEventType.FALLBACK_SUCCESS);
+        assertCommandExecutionEvents(commandDisabled, HystrixEventType.FAILURE);
+        assertNotNull(commandDisabled.getExecutionException());
         assertEquals(0, commandDisabled.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(2);
     }
 
@@ -4025,7 +2622,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         final AtomicReference<Thread> onErrorThread = new AtomicReference<Thread>();
         final AtomicBoolean isRequestContextInitialized = new AtomicBoolean();
 
-        TestHystrixCommand<?> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
+        TestHystrixCommand<Integer> command = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 200, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 50);
         command.toObservable().doOnError(new Action1<Throwable>() {
 
             @Override
@@ -4060,31 +2657,18 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         assertTrue(command.getExecutionTimeInMilliseconds() > -1);
         assertTrue(command.isResponseTimedOut());
-
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_REJECTION));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_FAILURE));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.FALLBACK_SUCCESS));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SEMAPHORE_REJECTED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.SHORT_CIRCUITED));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.THREAD_POOL_REJECTED));
-        assertEquals(1, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.TIMEOUT));
-        assertEquals(0, command.getBuilder().metrics.getRollingCount(HystrixRollingNumberEvent.RESPONSE_FROM_CACHE));
-
-        assertEquals(100, command.getBuilder().metrics.getHealthCounts().getErrorPercentage());
+        assertCommandExecutionEvents(command, HystrixEventType.TIMEOUT, HystrixEventType.FALLBACK_MISSING);
+        assertNotNull(command.getExecutionException());
         assertEquals(0, command.getBuilder().metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
     @Test
     public void testExceptionConvertedToBadRequestExceptionInExecutionHookBypassesCircuitBreaker() {
         TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        ExceptionToBadRequestByExecutionHookCommand command =  new ExceptionToBadRequestByExecutionHookCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD);
         try {
-            new ExceptionToBadRequestByExecutionHookCommand(circuitBreaker, ExecutionIsolationStrategy.THREAD).execute();
+            command.execute();
             fail("we expect to receive a " + HystrixBadRequestException.class.getSimpleName());
         } catch (HystrixBadRequestException e) {
             // success
@@ -4094,13 +2678,8 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             fail("We expect a " + HystrixBadRequestException.class.getSimpleName() + " but got a " + e.getClass().getSimpleName());
         }
 
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.SUCCESS));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.EXCEPTION_THROWN));
-        assertEquals(0, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.FAILURE));
-        assertEquals(1, circuitBreaker.metrics.getRollingCount(HystrixRollingNumberEvent.BAD_REQUEST));
-
+        assertCommandExecutionEvents(command, HystrixEventType.BAD_REQUEST);
         assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
-
         assertSaneHystrixRequestLog(1);
     }
 
@@ -4183,6 +2762,66 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     @Test
+    public void testCancelFutureWithInterruptionWhenPropertySaysNotTo() throws InterruptedException, ExecutionException {
+    	// given
+    	InterruptibleCommand cmd = new InterruptibleCommand(new TestCircuitBreaker(), true, false, 1000);
+
+        // when
+        Future<Boolean> f = cmd.queue();
+        Thread.sleep(500);
+        f.cancel(true);
+        Thread.sleep(500);
+
+        // then
+        try {
+        	f.get();
+        	fail("Should have thrown a CancellationException");
+        } catch (CancellationException e) {
+        	assertFalse(cmd.hasBeenInterrupted());
+        }
+    }
+
+    @Test
+    public void testCancelFutureWithInterruption() throws InterruptedException, ExecutionException {
+    	// given
+    	InterruptibleCommand cmd = new InterruptibleCommand(new TestCircuitBreaker(), true, true, 1000);
+
+        // when
+        Future<Boolean> f = cmd.queue();
+        Thread.sleep(500);
+        f.cancel(true);
+        Thread.sleep(500);
+
+        // then
+        try {
+        	f.get();
+        	fail("Should have thrown a CancellationException");
+        } catch (CancellationException e) {
+        	assertTrue(cmd.hasBeenInterrupted());
+        }
+    }
+
+    @Test
+    public void testCancelFutureWithoutInterruption() throws InterruptedException, ExecutionException, TimeoutException {
+    	// given
+    	InterruptibleCommand cmd = new InterruptibleCommand(new TestCircuitBreaker(), true, true, 1000);
+
+        // when
+        Future<Boolean> f = cmd.queue();
+        Thread.sleep(500);
+        f.cancel(false);
+        Thread.sleep(500);
+
+        // then
+        try {
+        	f.get();
+        	fail("Should have thrown a CancellationException");
+        } catch (CancellationException e) {
+        	assertFalse(cmd.hasBeenInterrupted());
+        }
+    }
+
+    @Test
     public void testChainedCommand() {
         class SubCommand extends TestHystrixCommand<Integer> {
 
@@ -4245,11 +2884,85 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     @Test
-    public void testOnRunStartHookThrows() {
-        final AtomicBoolean threadExceptionEncountered = new AtomicBoolean(false);
-        final AtomicBoolean semaphoreExceptionEncountered = new AtomicBoolean(false);
+    public void testSemaphoreThreadSafety() {
+        final int NUM_PERMITS = 1;
+        final TryableSemaphoreActual s = new TryableSemaphoreActual(HystrixProperty.Factory.asProperty(NUM_PERMITS));
+
+        final int NUM_THREADS = 10;
+        ExecutorService threadPool = Executors.newFixedThreadPool(NUM_THREADS);
+
+        final int NUM_TRIALS = 100;
+
+        for (int t = 0; t < NUM_TRIALS; t++) {
+
+            System.out.println("TRIAL : " + t);
+
+            final AtomicInteger numAcquired = new AtomicInteger(0);
+            final CountDownLatch latch = new CountDownLatch(NUM_THREADS);
+
+            for (int i = 0; i < NUM_THREADS; i++) {
+                threadPool.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean acquired = s.tryAcquire();
+                        if (acquired) {
+                            try {
+                                numAcquired.incrementAndGet();
+                                Thread.sleep(100);
+                            } catch (InterruptedException ex) {
+                                ex.printStackTrace();
+                            } finally {
+                                s.release();
+                            }
+                        }
+                        latch.countDown();
+                    }
+                });
+            }
+
+            try {
+                assertTrue(latch.await(10000, TimeUnit.MILLISECONDS));
+            } catch (InterruptedException ex) {
+                fail(ex.getMessage());
+            }
+
+            assertEquals("Number acquired should be equal to the number of permits", NUM_PERMITS, numAcquired.get());
+            assertEquals("Semaphore should always get released back to 0", 0, s.getNumberOfPermitsUsed());
+        }
+    }
+
+    @Test
+    public void testCancelledTasksInQueueGetRemoved() throws Exception {
+        HystrixCommandKey key = HystrixCommandKey.Factory.asKey("Cancellation-A");
+        TestCircuitBreaker circuitBreaker = new TestCircuitBreaker();
+        SingleThreadedPoolWithQueue pool = new SingleThreadedPoolWithQueue(10, 1);
+        TestCommandRejection command1 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
+        TestCommandRejection command2 = new TestCommandRejection(key, circuitBreaker, pool, 500, 600, TestCommandRejection.FALLBACK_NOT_IMPLEMENTED);
+
+        // this should go through the queue and into the thread pool
+        Future<Boolean> poolFiller = command1.queue();
+        // this command will stay in the queue until the thread pool is empty
+        Observable<Boolean> cmdInQueue = command2.observe();
+        Subscription s = cmdInQueue.subscribe();
+        assertEquals(1, pool.queue.size());
+        s.unsubscribe();
+        assertEquals(0, pool.queue.size());
+        //make sure we wait for the command to finish so the state is clean for next test
+        poolFiller.get();
+
+        assertCommandExecutionEvents(command1, HystrixEventType.SUCCESS);
+        assertCommandExecutionEvents(command2, HystrixEventType.CANCELLED);
+        assertEquals(0, circuitBreaker.metrics.getCurrentConcurrentExecutionCount());
+        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+        assertSaneHystrixRequestLog(2);
+    }
+
+    @Test
+    public void testOnRunStartHookThrowsSemaphoreIsolated() {
+        final AtomicBoolean exceptionEncountered = new AtomicBoolean(false);
         final AtomicBoolean onThreadStartInvoked = new AtomicBoolean(false);
         final AtomicBoolean onThreadCompleteInvoked = new AtomicBoolean(false);
+        final AtomicBoolean executionAttempted = new AtomicBoolean(false);
 
         class FailureInjectionHook extends HystrixCommandExecutionHook {
             @Override
@@ -4279,6 +2992,63 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
             @Override
             protected Integer run() throws Exception {
+                executionAttempted.set(true);
+                return 3;
+            }
+        }
+
+        TestHystrixCommand<Integer> semaphoreCmd = new FailureInjectedCommand(ExecutionIsolationStrategy.SEMAPHORE);
+        try {
+            int result = semaphoreCmd.execute();
+            System.out.println("RESULT : " + result);
+        } catch (Throwable ex) {
+            ex.printStackTrace();
+            exceptionEncountered.set(true);
+        }
+        assertTrue(exceptionEncountered.get());
+        assertFalse(onThreadStartInvoked.get());
+        assertFalse(onThreadCompleteInvoked.get());
+        assertFalse(executionAttempted.get());
+        assertEquals(0, semaphoreCmd.metrics.getCurrentConcurrentExecutionCount());
+
+    }
+
+    @Test
+    public void testOnRunStartHookThrowsThreadIsolated() {
+        final AtomicBoolean exceptionEncountered = new AtomicBoolean(false);
+        final AtomicBoolean onThreadStartInvoked = new AtomicBoolean(false);
+        final AtomicBoolean onThreadCompleteInvoked = new AtomicBoolean(false);
+        final AtomicBoolean executionAttempted = new AtomicBoolean(false);
+
+        class FailureInjectionHook extends HystrixCommandExecutionHook {
+            @Override
+            public <T> void onExecutionStart(HystrixInvokable<T> commandInstance) {
+                throw new HystrixRuntimeException(HystrixRuntimeException.FailureType.COMMAND_EXCEPTION, commandInstance.getClass(), "Injected Failure", null, null);
+            }
+
+            @Override
+            public <T> void onThreadStart(HystrixInvokable<T> commandInstance) {
+                onThreadStartInvoked.set(true);
+                super.onThreadStart(commandInstance);
+            }
+
+            @Override
+            public <T> void onThreadComplete(HystrixInvokable<T> commandInstance) {
+                onThreadCompleteInvoked.set(true);
+                super.onThreadComplete(commandInstance);
+            }
+        }
+
+        final FailureInjectionHook failureInjectionHook = new FailureInjectionHook();
+
+        class FailureInjectedCommand extends TestHystrixCommand<Integer> {
+            public FailureInjectedCommand(ExecutionIsolationStrategy isolationStrategy) {
+                super(testPropsBuilder(new TestCircuitBreaker()).setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionIsolationStrategy(isolationStrategy)), failureInjectionHook);
+            }
+
+            @Override
+            protected Integer run() throws Exception {
+                executionAttempted.set(true);
                 return 3;
             }
         }
@@ -4289,22 +3059,1628 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             System.out.println("RESULT : " + result);
         } catch (Throwable ex) {
             ex.printStackTrace();
-            threadExceptionEncountered.set(true);
+            exceptionEncountered.set(true);
         }
-        assertTrue(threadExceptionEncountered.get());
+        assertTrue(exceptionEncountered.get());
         assertTrue(onThreadStartInvoked.get());
         assertTrue(onThreadCompleteInvoked.get());
+        assertFalse(executionAttempted.get());
+        assertEquals(0, threadCmd.metrics.getCurrentConcurrentExecutionCount());
 
-        TestHystrixCommand<Integer> semaphoreCmd = new FailureInjectedCommand(ExecutionIsolationStrategy.SEMAPHORE);
-        try {
-            int result = semaphoreCmd.execute();
-            System.out.println("RESULT : " + result);
-        } catch (Throwable ex) {
-            ex.printStackTrace();
-            semaphoreExceptionEncountered.set(true);
-        }
-        assertTrue(semaphoreExceptionEncountered.get());
     }
+
+    @Test
+    public void testEarlyUnsubscribeDuringExecutionViaToObservable() {
+        class AsyncCommand extends HystrixCommand<Boolean> {
+
+            public AsyncCommand() {
+                super(Setter.withGroupKey(HystrixCommandGroupKey.Factory.asKey("ASYNC")));
+            }
+
+            @Override
+            protected Boolean run() {
+                try {
+                    Thread.sleep(500);
+                    return true;
+                } catch (InterruptedException ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+        }
+
+        HystrixCommand<Boolean> cmd = new AsyncCommand();
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        Observable<Boolean> o = cmd.toObservable();
+        Subscription s = o.
+                doOnUnsubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println("OnUnsubscribe");
+                        latch.countDown();
+                    }
+                }).
+                subscribe(new Subscriber<Boolean>() {
+                    @Override
+                    public void onCompleted() {
+                        System.out.println("OnCompleted");
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+                        System.out.println("OnError : " + e);
+                    }
+
+                    @Override
+                    public void onNext(Boolean b) {
+                        System.out.println("OnNext : " + b);
+                    }
+                });
+
+        try {
+            Thread.sleep(10);
+            s.unsubscribe();
+            assertTrue(latch.await(200, TimeUnit.MILLISECONDS));
+            System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+            assertEquals("Number of execution semaphores in use", 0, cmd.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use", 0, cmd.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(cmd.isExecutionComplete());
+            assertEquals(null, cmd.getFailedExecutionException());
+            assertNull(cmd.getExecutionException());
+            System.out.println("Execution time : " + cmd.getExecutionTimeInMilliseconds());
+            assertTrue(cmd.getExecutionTimeInMilliseconds() > -1);
+            assertFalse(cmd.isSuccessfulExecution());
+            assertCommandExecutionEvents(cmd, HystrixEventType.CANCELLED);
+            assertEquals(0, cmd.metrics.getCurrentConcurrentExecutionCount());
+            assertSaneHystrixRequestLog(1);
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testEarlyUnsubscribeDuringExecutionViaObserve() {
+        class AsyncCommand extends HystrixCommand<Boolean> {
+
+            public AsyncCommand() {
+                super(Setter.withGroupKey(HystrixCommandGroupKey.Factory.asKey("ASYNC")));
+            }
+
+            @Override
+            protected Boolean run() {
+                try {
+                    Thread.sleep(500);
+                    return true;
+                } catch (InterruptedException ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+        }
+
+        HystrixCommand<Boolean> cmd = new AsyncCommand();
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        Observable<Boolean> o = cmd.observe();
+        Subscription s = o.
+                doOnUnsubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println("OnUnsubscribe");
+                        latch.countDown();
+                    }
+                }).
+                subscribe(new Subscriber<Boolean>() {
+                    @Override
+                    public void onCompleted() {
+                        System.out.println("OnCompleted");
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+                        System.out.println("OnError : " + e);
+                    }
+
+                    @Override
+                    public void onNext(Boolean b) {
+                        System.out.println("OnNext : " + b);
+                    }
+                });
+
+        try {
+            Thread.sleep(10);
+            s.unsubscribe();
+            assertTrue(latch.await(200, TimeUnit.MILLISECONDS));
+            System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+            assertEquals("Number of execution semaphores in use", 0, cmd.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use", 0, cmd.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(cmd.isExecutionComplete());
+            assertEquals(null, cmd.getFailedExecutionException());
+            assertNull(cmd.getExecutionException());
+            assertTrue(cmd.getExecutionTimeInMilliseconds() > -1);
+            assertFalse(cmd.isSuccessfulExecution());
+            assertCommandExecutionEvents(cmd, HystrixEventType.CANCELLED);
+            assertEquals(0, cmd.metrics.getCurrentConcurrentExecutionCount());
+            assertSaneHystrixRequestLog(1);
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testEarlyUnsubscribeDuringFallback() {
+        class AsyncCommand extends HystrixCommand<Boolean> {
+
+            public AsyncCommand() {
+                super(Setter.withGroupKey(HystrixCommandGroupKey.Factory.asKey("ASYNC")));
+            }
+
+            @Override
+            protected Boolean run() {
+                throw new RuntimeException("run failure");
+            }
+
+            @Override
+            protected Boolean getFallback() {
+                try {
+                    Thread.sleep(500);
+                    return false;
+                } catch (InterruptedException ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+        }
+
+        HystrixCommand<Boolean> cmd = new AsyncCommand();
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        Observable<Boolean> o = cmd.toObservable();
+        Subscription s = o.
+                doOnUnsubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println("OnUnsubscribe");
+                        latch.countDown();
+                    }
+                }).
+                subscribe(new Subscriber<Boolean>() {
+                    @Override
+                    public void onCompleted() {
+                        System.out.println("OnCompleted");
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+                        System.out.println("OnError : " + e);
+                    }
+
+                    @Override
+                    public void onNext(Boolean b) {
+                        System.out.println("OnNext : " + b);
+                    }
+                });
+
+        try {
+            Thread.sleep(10); //give fallback a chance to fire
+            s.unsubscribe();
+            assertTrue(latch.await(200, TimeUnit.MILLISECONDS));
+            assertEquals("Number of execution semaphores in use", 0, cmd.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use", 0, cmd.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertEquals(0, cmd.metrics.getCurrentConcurrentExecutionCount());
+            assertFalse(cmd.isExecutionComplete());
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testRequestThenCacheHitAndCacheHitUnsubscribed() {
+        AsyncCacheableCommand original = new AsyncCacheableCommand("foo");
+        AsyncCacheableCommand fromCache = new AsyncCacheableCommand("foo");
+
+        final AtomicReference<Boolean> originalValue = new AtomicReference<Boolean>(null);
+        final AtomicReference<Boolean> fromCacheValue = new AtomicReference<Boolean>(null);
+
+        final CountDownLatch originalLatch = new CountDownLatch(1);
+        final CountDownLatch fromCacheLatch = new CountDownLatch(1);
+
+        Observable<Boolean> originalObservable = original.toObservable();
+        Observable<Boolean> fromCacheObservable = fromCache.toObservable();
+
+        Subscription originalSubscription = originalObservable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original Unsubscribe");
+                originalLatch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnCompleted");
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnError : " + e);
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnNext : " + b);
+                originalValue.set(b);
+            }
+        });
+
+        Subscription fromCacheSubscription = fromCacheObservable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " FromCache Unsubscribe");
+                fromCacheLatch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " FromCache OnCompleted");
+                fromCacheLatch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " FromCache OnError : " + e);
+                fromCacheLatch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " FromCache OnNext : " + b);
+                fromCacheValue.set(b);
+            }
+        });
+
+        try {
+            fromCacheSubscription.unsubscribe();
+            assertTrue(fromCacheLatch.await(600, TimeUnit.MILLISECONDS));
+            assertTrue(originalLatch.await(600, TimeUnit.MILLISECONDS));
+            assertEquals("Number of execution semaphores in use (original)", 0, original.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (original)", 0, original.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertTrue(original.isExecutionComplete());
+            assertTrue(original.isExecutedInThread());
+            assertEquals(null, original.getFailedExecutionException());
+            assertNull(original.getExecutionException());
+            assertTrue(original.getExecutionTimeInMilliseconds() > -1);
+            assertTrue(original.isSuccessfulExecution());
+            assertCommandExecutionEvents(original, HystrixEventType.SUCCESS);
+            assertTrue(originalValue.get());
+            assertEquals(0, original.metrics.getCurrentConcurrentExecutionCount());
+
+
+            assertEquals("Number of execution semaphores in use (fromCache)", 0, fromCache.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (fromCache)", 0, fromCache.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(fromCache.isExecutionComplete());
+            assertFalse(fromCache.isExecutedInThread());
+            assertEquals(null, fromCache.getFailedExecutionException());
+            assertNull(fromCache.getExecutionException());
+            assertCommandExecutionEvents(fromCache, HystrixEventType.RESPONSE_FROM_CACHE, HystrixEventType.CANCELLED);
+            assertTrue(fromCache.getExecutionTimeInMilliseconds() == -1);
+            assertFalse(fromCache.isSuccessfulExecution());
+            assertEquals(0, fromCache.metrics.getCurrentConcurrentExecutionCount());
+
+            assertFalse(original.isCancelled());  //underlying work
+            System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+            assertSaneHystrixRequestLog(2);
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testRequestThenCacheHitAndOriginalUnsubscribed() {
+        AsyncCacheableCommand original = new AsyncCacheableCommand("foo");
+        AsyncCacheableCommand fromCache = new AsyncCacheableCommand("foo");
+
+        final AtomicReference<Boolean> originalValue = new AtomicReference<Boolean>(null);
+        final AtomicReference<Boolean> fromCacheValue = new AtomicReference<Boolean>(null);
+
+        final CountDownLatch originalLatch = new CountDownLatch(1);
+        final CountDownLatch fromCacheLatch = new CountDownLatch(1);
+
+        Observable<Boolean> originalObservable = original.toObservable();
+        Observable<Boolean> fromCacheObservable = fromCache.toObservable();
+
+        Subscription originalSubscription = originalObservable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original Unsubscribe");
+                originalLatch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnCompleted");
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnError : " + e);
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnNext : " + b);
+                originalValue.set(b);
+            }
+        });
+
+        Subscription fromCacheSubscription = fromCacheObservable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache Unsubscribe");
+                fromCacheLatch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache OnCompleted");
+                fromCacheLatch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache OnError : " + e);
+                fromCacheLatch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache OnNext : " + b);
+                fromCacheValue.set(b);
+            }
+        });
+
+        try {
+            Thread.sleep(10);
+            originalSubscription.unsubscribe();
+            assertTrue(originalLatch.await(600, TimeUnit.MILLISECONDS));
+            assertTrue(fromCacheLatch.await(600, TimeUnit.MILLISECONDS));
+            assertEquals("Number of execution semaphores in use (original)", 0, original.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (original)", 0, original.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(original.isExecutionComplete());
+            assertTrue(original.isExecutedInThread());
+            assertEquals(null, original.getFailedExecutionException());
+            assertNull(original.getExecutionException());
+            assertTrue(original.getExecutionTimeInMilliseconds() > -1);
+            assertFalse(original.isSuccessfulExecution());
+            assertCommandExecutionEvents(original, HystrixEventType.CANCELLED);
+            assertNull(originalValue.get());
+            assertEquals(0, original.metrics.getCurrentConcurrentExecutionCount());
+
+            assertEquals("Number of execution semaphores in use (fromCache)", 0, fromCache.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (fromCache)", 0, fromCache.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertTrue(fromCache.isExecutionComplete());
+            assertFalse(fromCache.isExecutedInThread());
+            assertEquals(null, fromCache.getFailedExecutionException());
+            assertNull(fromCache.getExecutionException());
+            assertCommandExecutionEvents(fromCache, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+            assertTrue(fromCache.getExecutionTimeInMilliseconds() == -1);
+            assertTrue(fromCache.isSuccessfulExecution());
+            assertEquals(0, fromCache.metrics.getCurrentConcurrentExecutionCount());
+
+            assertFalse(original.isCancelled());  //underlying work
+            System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+            assertSaneHystrixRequestLog(2);
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testRequestThenTwoCacheHitsOriginalAndOneCacheHitUnsubscribed() {
+        AsyncCacheableCommand original = new AsyncCacheableCommand("foo");
+        AsyncCacheableCommand fromCache1 = new AsyncCacheableCommand("foo");
+        AsyncCacheableCommand fromCache2 = new AsyncCacheableCommand("foo");
+
+        final AtomicReference<Boolean> originalValue = new AtomicReference<Boolean>(null);
+        final AtomicReference<Boolean> fromCache1Value = new AtomicReference<Boolean>(null);
+        final AtomicReference<Boolean> fromCache2Value = new AtomicReference<Boolean>(null);
+
+        final CountDownLatch originalLatch = new CountDownLatch(1);
+        final CountDownLatch fromCache1Latch = new CountDownLatch(1);
+        final CountDownLatch fromCache2Latch = new CountDownLatch(1);
+
+        Observable<Boolean> originalObservable = original.toObservable();
+        Observable<Boolean> fromCache1Observable = fromCache1.toObservable();
+        Observable<Boolean> fromCache2Observable = fromCache2.toObservable();
+
+        Subscription originalSubscription = originalObservable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original Unsubscribe");
+                originalLatch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnCompleted");
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnError : " + e);
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnNext : " + b);
+                originalValue.set(b);
+            }
+        });
+
+        Subscription fromCache1Subscription = fromCache1Observable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 Unsubscribe");
+                fromCache1Latch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 OnCompleted");
+                fromCache1Latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 OnError : " + e);
+                fromCache1Latch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 OnNext : " + b);
+                fromCache1Value.set(b);
+            }
+        });
+
+        Subscription fromCache2Subscription = fromCache2Observable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 Unsubscribe");
+                fromCache2Latch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 OnCompleted");
+                fromCache2Latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 OnError : " + e);
+                fromCache2Latch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 OnNext : " + b);
+                fromCache2Value.set(b);
+            }
+        });
+
+        try {
+            Thread.sleep(10);
+            originalSubscription.unsubscribe();
+            //fromCache1Subscription.unsubscribe();
+            fromCache2Subscription.unsubscribe();
+            assertTrue(originalLatch.await(600, TimeUnit.MILLISECONDS));
+            assertTrue(fromCache1Latch.await(600, TimeUnit.MILLISECONDS));
+            assertTrue(fromCache2Latch.await(600, TimeUnit.MILLISECONDS));
+            System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+
+            assertEquals("Number of execution semaphores in use (original)", 0, original.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (original)", 0, original.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(original.isExecutionComplete());
+            assertTrue(original.isExecutedInThread());
+            assertEquals(null, original.getFailedExecutionException());
+            assertNull(original.getExecutionException());
+            assertTrue(original.getExecutionTimeInMilliseconds() > -1);
+            assertFalse(original.isSuccessfulExecution());
+            assertCommandExecutionEvents(original, HystrixEventType.CANCELLED);
+            assertNull(originalValue.get());
+            assertFalse(original.isCancelled());   //underlying work
+            assertEquals(0, original.metrics.getCurrentConcurrentExecutionCount());
+
+
+            assertEquals("Number of execution semaphores in use (fromCache1)", 0, fromCache1.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (fromCache1)", 0, fromCache1.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertTrue(fromCache1.isExecutionComplete());
+            assertFalse(fromCache1.isExecutedInThread());
+            assertEquals(null, fromCache1.getFailedExecutionException());
+            assertNull(fromCache1.getExecutionException());
+            assertCommandExecutionEvents(fromCache1, HystrixEventType.SUCCESS, HystrixEventType.RESPONSE_FROM_CACHE);
+            assertTrue(fromCache1.getExecutionTimeInMilliseconds() == -1);
+            assertTrue(fromCache1.isSuccessfulExecution());
+            assertTrue(fromCache1Value.get());
+            assertEquals(0, fromCache1.metrics.getCurrentConcurrentExecutionCount());
+
+
+            assertEquals("Number of execution semaphores in use (fromCache2)", 0, fromCache2.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (fromCache2)", 0, fromCache2.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(fromCache2.isExecutionComplete());
+            assertFalse(fromCache2.isExecutedInThread());
+            assertEquals(null, fromCache2.getFailedExecutionException());
+            assertNull(fromCache2.getExecutionException());
+            assertCommandExecutionEvents(fromCache2, HystrixEventType.RESPONSE_FROM_CACHE, HystrixEventType.CANCELLED);
+            assertTrue(fromCache2.getExecutionTimeInMilliseconds() == -1);
+            assertFalse(fromCache2.isSuccessfulExecution());
+            assertNull(fromCache2Value.get());
+            assertEquals(0, fromCache2.metrics.getCurrentConcurrentExecutionCount());
+
+            assertSaneHystrixRequestLog(3);
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    @Test
+    public void testRequestThenTwoCacheHitsAllUnsubscribed() {
+        AsyncCacheableCommand original = new AsyncCacheableCommand("foo");
+        AsyncCacheableCommand fromCache1 = new AsyncCacheableCommand("foo");
+        AsyncCacheableCommand fromCache2 = new AsyncCacheableCommand("foo");
+
+        final CountDownLatch originalLatch = new CountDownLatch(1);
+        final CountDownLatch fromCache1Latch = new CountDownLatch(1);
+        final CountDownLatch fromCache2Latch = new CountDownLatch(1);
+
+        Observable<Boolean> originalObservable = original.toObservable();
+        Observable<Boolean> fromCache1Observable = fromCache1.toObservable();
+        Observable<Boolean> fromCache2Observable = fromCache2.toObservable();
+
+        Subscription originalSubscription = originalObservable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original Unsubscribe");
+                originalLatch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnCompleted");
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnError : " + e);
+                originalLatch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.Original OnNext : " + b);
+            }
+        });
+
+        Subscription fromCache1Subscription = fromCache1Observable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 Unsubscribe");
+                fromCache1Latch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 OnCompleted");
+                fromCache1Latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 OnError : " + e);
+                fromCache1Latch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache1 OnNext : " + b);
+            }
+        });
+
+        Subscription fromCache2Subscription = fromCache2Observable.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 Unsubscribe");
+                fromCache2Latch.countDown();
+            }
+        }).subscribe(new Subscriber<Boolean>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 OnCompleted");
+                fromCache2Latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 OnError : " + e);
+                fromCache2Latch.countDown();
+            }
+
+            @Override
+            public void onNext(Boolean b) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " Test.FromCache2 OnNext : " + b);
+            }
+        });
+
+        try {
+            Thread.sleep(10);
+            originalSubscription.unsubscribe();
+            fromCache1Subscription.unsubscribe();
+            fromCache2Subscription.unsubscribe();
+            assertTrue(originalLatch.await(200, TimeUnit.MILLISECONDS));
+            assertTrue(fromCache1Latch.await(200, TimeUnit.MILLISECONDS));
+            assertTrue(fromCache2Latch.await(200, TimeUnit.MILLISECONDS));
+            System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+
+            assertEquals("Number of execution semaphores in use (original)", 0, original.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (original)", 0, original.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(original.isExecutionComplete());
+            assertTrue(original.isExecutedInThread());
+            System.out.println("FEE : " + original.getFailedExecutionException());
+            if (original.getFailedExecutionException() != null) {
+                original.getFailedExecutionException().printStackTrace();
+            }
+            assertNull(original.getFailedExecutionException());
+            assertNull(original.getExecutionException());
+            assertTrue(original.getExecutionTimeInMilliseconds() > -1);
+            assertFalse(original.isSuccessfulExecution());
+            assertCommandExecutionEvents(original, HystrixEventType.CANCELLED);
+            //assertTrue(original.isCancelled());   //underlying work  This doesn't work yet
+            assertEquals(0, original.metrics.getCurrentConcurrentExecutionCount());
+
+
+            assertEquals("Number of execution semaphores in use (fromCache1)", 0, fromCache1.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (fromCache1)", 0, fromCache1.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(fromCache1.isExecutionComplete());
+            assertFalse(fromCache1.isExecutedInThread());
+            assertEquals(null, fromCache1.getFailedExecutionException());
+            assertNull(fromCache1.getExecutionException());
+            assertCommandExecutionEvents(fromCache1, HystrixEventType.RESPONSE_FROM_CACHE, HystrixEventType.CANCELLED);
+            assertTrue(fromCache1.getExecutionTimeInMilliseconds() == -1);
+            assertFalse(fromCache1.isSuccessfulExecution());
+            assertEquals(0, fromCache1.metrics.getCurrentConcurrentExecutionCount());
+
+
+            assertEquals("Number of execution semaphores in use (fromCache2)", 0, fromCache2.getExecutionSemaphore().getNumberOfPermitsUsed());
+            assertEquals("Number of fallback semaphores in use (fromCache2)", 0, fromCache2.getFallbackSemaphore().getNumberOfPermitsUsed());
+            assertFalse(fromCache2.isExecutionComplete());
+            assertFalse(fromCache2.isExecutedInThread());
+            assertEquals(null, fromCache2.getFailedExecutionException());
+            assertNull(fromCache2.getExecutionException());
+            assertCommandExecutionEvents(fromCache2, HystrixEventType.RESPONSE_FROM_CACHE, HystrixEventType.CANCELLED);
+            assertTrue(fromCache2.getExecutionTimeInMilliseconds() == -1);
+            assertFalse(fromCache2.isSuccessfulExecution());
+            assertEquals(0, fromCache2.metrics.getCurrentConcurrentExecutionCount());
+
+            assertSaneHystrixRequestLog(3);
+        } catch (InterruptedException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    /**
+     * Some RxJava operators like take(n), zip receive data in an onNext from upstream and immediately unsubscribe.
+     * When upstream is a HystrixCommand, Hystrix may get that unsubscribe before it gets to its onCompleted.
+     * This should still be marked as a HystrixEventType.SUCCESS.
+     */
+    @Test
+    public void testUnsubscribingDownstreamOperatorStillResultsInSuccessEventType() throws InterruptedException {
+        HystrixCommand<Integer> cmd = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 100, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+
+        Observable<Integer> o = cmd.toObservable()
+                .doOnNext(new Action1<Integer>() {
+                    @Override
+                    public void call(Integer i) {
+                        System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " CMD OnNext : " + i);
+                    }
+                })
+                .doOnError(new Action1<Throwable>() {
+                    @Override
+                    public void call(Throwable throwable) {
+                        System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " CMD OnError : " + throwable);
+                    }
+                })
+                .doOnCompleted(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " CMD OnCompleted");
+                    }
+                })
+                .doOnSubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " CMD OnSubscribe");
+                    }
+                })
+                .doOnUnsubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " CMD OnUnsubscribe");
+                    }
+                })
+                .take(1)
+                .observeOn(Schedulers.io())
+                .map(new Func1<Integer, Integer>() {
+                    @Override
+                    public Integer call(Integer i) {
+                        System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " : Doing some more computation in the onNext!!");
+                        try {
+                            Thread.sleep(100);
+                        } catch (InterruptedException ex) {
+                            ex.printStackTrace();
+                        }
+                        return i;
+                    }
+                });
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        o.doOnSubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " : OnSubscribe");
+            }
+        }).doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " : OnUnsubscribe");
+            }
+        }).subscribe(new Subscriber<Integer>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " : OnCompleted");
+                latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " : OnError : " + e);
+                latch.countDown();
+            }
+
+            @Override
+            public void onNext(Integer i) {
+                System.out.println(Thread.currentThread().getName() + " : " + System.currentTimeMillis() + " : OnNext : " + i);
+            }
+        });
+
+        latch.await(1000, TimeUnit.MILLISECONDS);
+
+        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+        assertTrue(cmd.isExecutedInThread());
+        assertCommandExecutionEvents(cmd, HystrixEventType.SUCCESS);
+    }
+
+    @Test
+    public void testUnsubscribeBeforeSubscribe() throws Exception {
+        //this may happen in Observable chain, so Hystrix should make sure that command never executes/allocates in this situation
+        Observable<String> error = Observable.error(new RuntimeException("foo"));
+        HystrixCommand<Integer> cmd = getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 100);
+        Observable<Integer> cmdResult = cmd.toObservable()
+                .doOnNext(new Action1<Integer>() {
+                    @Override
+                    public void call(Integer integer) {
+                        System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnNext : " + integer);
+                    }
+                })
+                .doOnError(new Action1<Throwable>() {
+                    @Override
+                    public void call(Throwable ex) {
+                        System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnError : " + ex);
+                    }
+                })
+                .doOnCompleted(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnCompleted");
+                    }
+                })
+                .doOnSubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnSubscribe");
+                    }
+                })
+                .doOnUnsubscribe(new Action0() {
+                    @Override
+                    public void call() {
+                        System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnUnsubscribe");
+                    }
+                });
+
+        //the zip operator will subscribe to each observable.  there is a race between the error of the first
+        //zipped observable terminating the zip and the subscription to the command's observable
+        Observable<String> zipped = Observable.zip(error, cmdResult, new Func2<String, Integer, String>() {
+            @Override
+            public String call(String s, Integer integer) {
+                return s + integer;
+            }
+        });
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        zipped.subscribe(new Subscriber<String>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " OnCompleted");
+                latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " OnError : " + e);
+                latch.countDown();
+            }
+
+            @Override
+            public void onNext(String s) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " OnNext : " + s);
+            }
+        });
+
+        latch.await(1000, TimeUnit.MILLISECONDS);
+        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+    }
+
+    @Test
+    public void testRxRetry() throws Exception {
+        // see https://github.com/Netflix/Hystrix/issues/1100
+        // Since each command instance is single-use, the expectation is that applying the .retry() operator
+        // results in only a single execution and propagation out of that error
+        HystrixCommand<Integer> cmd = getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 300,
+                AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 100);
+
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        System.out.println(System.currentTimeMillis() + " : Starting");
+        Observable<Integer> o = cmd.toObservable().retry(2);
+        System.out.println(System.currentTimeMillis() + " Created retried command : " + o);
+
+        o.subscribe(new Subscriber<Integer>() {
+            @Override
+            public void onCompleted() {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnCompleted");
+                latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnError : " + e);
+                latch.countDown();
+            }
+
+            @Override
+            public void onNext(Integer integer) {
+                System.out.println(System.currentTimeMillis() + " : " + Thread.currentThread().getName() + " : OnNext : " + integer);
+            }
+        });
+
+        latch.await(1000, TimeUnit.MILLISECONDS);
+        System.out.println(System.currentTimeMillis() + " ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+    }
+
+    /**
+     *********************** THREAD-ISOLATED Execution Hook Tests **************************************
+     */
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: NO
+     * Execution Result: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadSuccess() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(1, 0, 1));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onExecutionEmit - !onRunSuccess - !onComplete - onEmit - onExecutionSuccess - onThreadComplete - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: NO
+     * Execution Result: synchronous HystrixBadRequestException
+     */
+    @Test
+    public void testExecutionHookThreadBadRequestException() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.BAD_REQUEST);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 1, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(HystrixBadRequestException.class, hook.getCommandException().getClass());
+                        assertEquals(HystrixBadRequestException.class, hook.getExecutionException().getClass());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onExecutionError - !onRunError - onThreadComplete - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: NO
+     * Execution Result: synchronous HystrixRuntimeException
+     * Fallback: UnsupportedOperationException
+     */
+    @Test
+    public void testExecutionHookThreadExceptionNoFallback() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 0, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 1, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(RuntimeException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getExecutionException().getClass());
+                        assertNull(hook.getFallbackException());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onExecutionError - !onRunError - onThreadComplete - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: NO
+     * Execution Result: synchronous HystrixRuntimeException
+     * Fallback: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadExceptionSuccessfulFallback() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 0, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(0, 1, 0));
+                        assertTrue(hook.fallbackEventsMatch(1, 0, 1));
+                        assertEquals(RuntimeException.class, hook.getExecutionException().getClass());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onExecutionError - !onRunError - onThreadComplete - onFallbackStart - onFallbackEmit - !onFallbackSuccess - !onComplete - onEmit - onFallbackSuccess - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: NO
+     * Execution Result: synchronous HystrixRuntimeException
+     * Fallback: HystrixRuntimeException
+     */
+    @Test
+    public void testExecutionHookThreadExceptionUnsuccessfulFallback() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 0, AbstractTestHystrixCommand.FallbackResult.FAILURE);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 1, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 1, 0));
+                        assertEquals(RuntimeException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getExecutionException().getClass());
+                        assertEquals(RuntimeException.class, hook.getFallbackException().getClass());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onExecutionError - !onRunError - onThreadComplete - onFallbackStart - onFallbackError - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: YES
+     * Execution Result: SUCCESS (but timeout prior)
+     * Fallback: UnsupportedOperationException
+     */
+    @Test
+    public void testExecutionHookThreadTimeoutNoFallbackRunSuccess() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 200);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(TimeoutException.class, hook.getCommandException().getClass());
+                        assertNull(hook.getFallbackException());
+                        System.out.println("RequestLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onThreadComplete - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: YES
+     * Execution Result: SUCCESS (but timeout prior)
+     * Fallback: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadTimeoutSuccessfulFallbackRunSuccess() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 200);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(1, 0, 1));
+                        System.out.println("RequestLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onThreadComplete - onFallbackStart - onFallbackEmit - !onFallbackSuccess - !onComplete - onEmit - onFallbackSuccess - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: YES
+     * Execution Result: SUCCESS (but timeout prior)
+     * Fallback: synchronous HystrixRuntimeException
+     */
+    @Test
+    public void testExecutionHookThreadTimeoutUnsuccessfulFallbackRunSuccess() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, 200);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 1, 0));
+                        assertEquals(TimeoutException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getFallbackException().getClass());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onThreadComplete - onFallbackStart - onFallbackError - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: YES
+     * Execution Result: HystrixRuntimeException (but timeout prior)
+     * Fallback: UnsupportedOperationException
+     */
+    @Test
+    public void testExecutionHookThreadTimeoutNoFallbackRunFailure() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 200);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(TimeoutException.class, hook.getCommandException().getClass());
+                        assertNull(hook.getFallbackException());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onThreadComplete - onError - ", hook.executionSequence.toString());
+
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: YES
+     * Execution Result: HystrixRuntimeException (but timeout prior)
+     * Fallback: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadTimeoutSuccessfulFallbackRunFailure() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, 200);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        System.out.println("ReqLog : " + HystrixRequestLog.getCurrentRequest().getExecutedCommandsAsString());
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(1, 0, 1));
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onThreadComplete - onFallbackStart - onFallbackEmit - !onFallbackSuccess - !onComplete - onEmit - onFallbackSuccess - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : NO
+     * Thread Pool Queue full?: NO
+     * Timeout: YES
+     * Execution Result: HystrixRuntimeException (but timeout prior)
+     * Fallback: synchronous HystrixRuntimeException
+     */
+    @Test
+    public void testExecutionHookThreadTimeoutUnsuccessfulFallbackRunFailure() {
+        assertHooksOnFailure(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.FAILURE, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, 200);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 1, 0));
+                        assertEquals(TimeoutException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getFallbackException().getClass());
+                        assertEquals("onStart - onThreadStart - !onRunStart - onExecutionStart - onThreadComplete - onFallbackStart - onFallbackError - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : YES
+     * Thread Pool Queue full?: YES
+     * Fallback: UnsupportedOperationException
+     */
+    @Test
+    public void testExecutionHookThreadPoolQueueFullNoFallback() {
+        assertHooksOnFailFast(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker();
+                        HystrixThreadPool pool = new SingleThreadedPoolWithQueue(1);
+                        try {
+                            // fill the pool
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, circuitBreaker, pool, 600).observe();
+                            // fill the queue
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, circuitBreaker, pool, 600).observe();
+                        } catch (Exception e) {
+                            // ignore
+                        }
+                        return getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, circuitBreaker, pool, 600);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(RejectedExecutionException.class, hook.getCommandException().getClass());
+                        assertNull(hook.getFallbackException());
+                        assertEquals("onStart - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : YES
+     * Thread Pool Queue full?: YES
+     * Fallback: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadPoolQueueFullSuccessfulFallback() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker();
+                        HystrixThreadPool pool = new SingleThreadedPoolWithQueue(1);
+                        try {
+                            // fill the pool
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker, pool, 600).observe();
+                            // fill the queue
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker, pool, 600).observe();
+                        } catch (Exception e) {
+                            // ignore
+                        }
+
+                        return getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker, pool, 600);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(1, 0, 1));
+                        assertEquals("onStart - onFallbackStart - onFallbackEmit - !onFallbackSuccess - !onComplete - onEmit - onFallbackSuccess - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : YES
+     * Thread Pool Queue full?: YES
+     * Fallback: synchronous HystrixRuntimeException
+     */
+    @Test
+    public void testExecutionHookThreadPoolQueueFullUnsuccessfulFallback() {
+        assertHooksOnFailFast(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker();
+                        HystrixThreadPool pool = new SingleThreadedPoolWithQueue(1);
+                        try {
+                            // fill the pool
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, circuitBreaker, pool, 600).observe();
+                            // fill the queue
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, circuitBreaker, pool, 600).observe();
+                        } catch (Exception e) {
+                            // ignore
+                        }
+
+                        return getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, circuitBreaker, pool, 600);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 1, 0));
+                        assertEquals(RejectedExecutionException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getFallbackException().getClass());
+                        assertEquals("onStart - onFallbackStart - onFallbackError - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : YES
+     * Thread Pool Queue full?: N/A
+     * Fallback: UnsupportedOperationException
+     */
+    @Test
+    public void testExecutionHookThreadPoolFullNoFallback() {
+        assertHooksOnFailFast(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker();
+                        HystrixThreadPool pool = new SingleThreadedPoolWithNoQueue();
+                        try {
+                            // fill the pool
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, circuitBreaker, pool, 600).observe();
+                        } catch (Exception e) {
+                            // ignore
+                        }
+
+                        return getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, circuitBreaker, pool, 600);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(RejectedExecutionException.class, hook.getCommandException().getClass());
+                        assertNull(hook.getFallbackException());
+                        assertEquals("onStart - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : YES
+     * Thread Pool Queue full?: N/A
+     * Fallback: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadPoolFullSuccessfulFallback() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker();
+                        HystrixThreadPool pool = new SingleThreadedPoolWithNoQueue();
+                        try {
+                            // fill the pool
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker, pool, 600).observe();
+                        } catch (Exception e) {
+                            // ignore
+                        }
+
+                        return getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.SUCCESS, circuitBreaker, pool, 600);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertEquals("onStart - onFallbackStart - onFallbackEmit - !onFallbackSuccess - !onComplete - onEmit - onFallbackSuccess - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Thread/semaphore: THREAD
+     * Thread Pool full? : YES
+     * Thread Pool Queue full?: N/A
+     * Fallback: synchronous HystrixRuntimeException
+     */
+    @Test
+    public void testExecutionHookThreadPoolFullUnsuccessfulFallback() {
+        assertHooksOnFailFast(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker();
+                        HystrixThreadPool pool = new SingleThreadedPoolWithNoQueue();
+                        try {
+                            // fill the pool
+                            getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, circuitBreaker, pool, 600).observe();
+                        } catch (Exception e) {
+                            // ignore
+                        }
+
+                        return getLatentCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 500, AbstractTestHystrixCommand.FallbackResult.FAILURE, circuitBreaker, pool, 600);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 1, 0));
+                        assertEquals(RejectedExecutionException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getFallbackException().getClass());
+                        assertEquals("onStart - onFallbackStart - onFallbackError - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : YES
+     * Thread/semaphore: THREAD
+     * Fallback: UnsupportedOperationException
+     */
+    @Test
+    public void testExecutionHookThreadShortCircuitNoFallback() {
+        assertHooksOnFailFast(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCircuitOpenCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals(RuntimeException.class, hook.getCommandException().getClass());
+                        assertNull(hook.getFallbackException());
+                        assertEquals("onStart - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : YES
+     * Thread/semaphore: THREAD
+     * Fallback: SUCCESS
+     */
+    @Test
+    public void testExecutionHookThreadShortCircuitSuccessfulFallback() {
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCircuitOpenCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.SUCCESS);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(1, 0, 1));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(1, 0, 1));
+                        assertEquals("onStart - onFallbackStart - onFallbackEmit - !onFallbackSuccess - !onComplete - onEmit - onFallbackSuccess - onSuccess - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : YES
+     * Thread/semaphore: THREAD
+     * Fallback: synchronous HystrixRuntimeException
+     */
+    @Test
+    public void testExecutionHookThreadShortCircuitUnsuccessfulFallback() {
+        assertHooksOnFailFast(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        HystrixCircuitBreakerTest.TestCircuitBreaker circuitBreaker = new HystrixCircuitBreakerTest.TestCircuitBreaker().setForceShortCircuit(true);
+                        return getCircuitOpenCommand(ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.FallbackResult.FAILURE);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 1, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 1, 0));
+                        assertEquals(RuntimeException.class, hook.getCommandException().getClass());
+                        assertEquals(RuntimeException.class, hook.getFallbackException().getClass());
+                        assertEquals("onStart - onFallbackStart - onFallbackError - onError - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     * Short-circuit? : NO
+     * Request-cache? : YES
+     */
+    @Test
+    public void testExecutionHookResponseFromCache() {
+        final HystrixCommandKey key = HystrixCommandKey.Factory.asKey("Hook-Cache");
+        getCommand(key, ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 0, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 0, new HystrixCircuitBreakerTest.TestCircuitBreaker(), null, 100, AbstractTestHystrixCommand.CacheEnabled.YES, 42, 10, 10).observe();
+
+        assertHooksOnSuccess(
+                new Func0<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public TestHystrixCommand<Integer> call() {
+                        return getCommand(key, ExecutionIsolationStrategy.THREAD, AbstractTestHystrixCommand.ExecutionResult.SUCCESS, 0, AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED, 0, new HystrixCircuitBreakerTest.TestCircuitBreaker(), null, 100, AbstractTestHystrixCommand.CacheEnabled.YES, 42, 10, 10);
+                    }
+                },
+                new Action1<TestHystrixCommand<Integer>>() {
+                    @Override
+                    public void call(TestHystrixCommand<Integer> command) {
+                        TestableExecutionHook hook = command.getBuilder().executionHook;
+                        assertTrue(hook.commandEmissionsMatch(0, 0, 0));
+                        assertTrue(hook.executionEventsMatch(0, 0, 0));
+                        assertTrue(hook.fallbackEventsMatch(0, 0, 0));
+                        assertEquals("onCacheHit - ", hook.executionSequence.toString());
+                    }
+                });
+    }
+
+    /**
+     *********************** END THREAD-ISOLATED Execution Hook Tests **************************************
+     */
+
 
     /* ******************************************************************************** */
     /* ******************************************************************************** */
@@ -4312,21 +4688,29 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     /* ******************************************************************************** */
     /* ******************************************************************************** */
 
+    static AtomicInteger uniqueNameCounter = new AtomicInteger(1);
+
     @Override
-    TestHystrixCommand<?> getCommand(ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, AbstractTestHystrixCommand.FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, AbstractTestHystrixCommand.CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
-        return FlexibleTestHystrixCommand.from(isolationStrategy, executionResult, executionLatency, fallbackResult, fallbackLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
+    TestHystrixCommand<Integer> getCommand(ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, AbstractTestHystrixCommand.FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, AbstractTestHystrixCommand.CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
+        HystrixCommandKey commandKey = HystrixCommandKey.Factory.asKey("Flexible-" + uniqueNameCounter.getAndIncrement());
+        return FlexibleTestHystrixCommand.from(commandKey, isolationStrategy, executionResult, executionLatency, fallbackResult, fallbackLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
+    }
+
+    @Override
+    TestHystrixCommand<Integer> getCommand(HystrixCommandKey commandKey, ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, AbstractTestHystrixCommand.FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, AbstractTestHystrixCommand.CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
+        return FlexibleTestHystrixCommand.from(commandKey, isolationStrategy, executionResult, executionLatency, fallbackResult, fallbackLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
     }
 
     private static class FlexibleTestHystrixCommand {
 
-        public static int EXECUTE_VALUE = 1;
-        public static int FALLBACK_VALUE = 11;
+        public static Integer EXECUTE_VALUE = 1;
+        public static Integer FALLBACK_VALUE = 11;
 
-        public static AbstractFlexibleTestHystrixCommand from(ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, AbstractTestHystrixCommand.FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, AbstractTestHystrixCommand.CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
+        public static AbstractFlexibleTestHystrixCommand from(HystrixCommandKey commandKey, ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, AbstractTestHystrixCommand.FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, AbstractTestHystrixCommand.CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
             if (fallbackResult.equals(AbstractTestHystrixCommand.FallbackResult.UNIMPLEMENTED)) {
-                return new FlexibleTestHystrixCommandNoFallback(isolationStrategy, executionResult, executionLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
+                return new FlexibleTestHystrixCommandNoFallback(commandKey, isolationStrategy, executionResult, executionLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
             } else {
-                return new FlexibleTestHystrixCommandWithFallback(isolationStrategy, executionResult, executionLatency, fallbackResult, fallbackLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
+                return new FlexibleTestHystrixCommandWithFallback(commandKey, isolationStrategy, executionResult, executionLatency, fallbackResult, fallbackLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
             }
         }
     }
@@ -4338,8 +4722,10 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         protected final CacheEnabled cacheEnabled;
         protected final Object value;
 
-        AbstractFlexibleTestHystrixCommand(ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
-            super(testPropsBuilder()
+
+        AbstractFlexibleTestHystrixCommand(HystrixCommandKey commandKey, ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
+            super(testPropsBuilder(circuitBreaker)
+                    .setCommandKey(commandKey)
                     .setCircuitBreaker(circuitBreaker)
                     .setMetrics(circuitBreaker.metrics)
                     .setThreadPool(threadPool)
@@ -4410,8 +4796,8 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         protected final AbstractTestHystrixCommand.FallbackResult fallbackResult;
         protected final int fallbackLatency;
 
-        FlexibleTestHystrixCommandWithFallback(ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
-            super(isolationStrategy, executionResult, executionLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
+        FlexibleTestHystrixCommandWithFallback(HystrixCommandKey commandKey, ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, FallbackResult fallbackResult, int fallbackLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
+            super(commandKey, isolationStrategy, executionResult, executionLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
             this.fallbackResult = fallbackResult;
             this.fallbackLatency = fallbackLatency;
         }
@@ -4432,8 +4818,8 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     private static class FlexibleTestHystrixCommandNoFallback extends AbstractFlexibleTestHystrixCommand {
-        FlexibleTestHystrixCommandNoFallback(ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
-            super(isolationStrategy, executionResult, executionLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
+        FlexibleTestHystrixCommandNoFallback(HystrixCommandKey commandKey, ExecutionIsolationStrategy isolationStrategy, AbstractTestHystrixCommand.ExecutionResult executionResult, int executionLatency, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int timeout, CacheEnabled cacheEnabled, Object value, TryableSemaphore executionSemaphore, TryableSemaphore fallbackSemaphore, boolean circuitBreakerDisabled) {
+            super(commandKey, isolationStrategy, executionResult, executionLatency, circuitBreaker, threadPool, timeout, cacheEnabled, value, executionSemaphore, fallbackSemaphore, circuitBreakerDisabled);
         }
     }
 
@@ -4642,22 +5028,6 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     }
 
     /**
-     * Successful execution - no fallback implementation, circuit-breaker disabled.
-     */
-    private static class TestCommandWithoutCircuitBreaker extends TestHystrixCommand<Boolean> {
-
-        private TestCommandWithoutCircuitBreaker() {
-            super(testPropsBuilder().setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withCircuitBreakerEnabled(false)));
-        }
-
-        @Override
-        protected Boolean run() {
-            System.out.println("successfully executed");
-            return true;
-        }
-    }
-
-    /**
      * This has a ThreadPool that has a single thread and queueSize of 1.
      */
     private static class TestCommandRejection extends TestHystrixCommand<Boolean> {
@@ -4670,8 +5040,12 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
         private final int sleepTime;
 
-        private TestCommandRejection(TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int sleepTime, int timeout, int fallbackBehavior) {
-            super(testPropsBuilder().setThreadPool(threadPool).setCircuitBreaker(circuitBreaker).setMetrics(circuitBreaker.metrics)
+        private TestCommandRejection(HystrixCommandKey key, TestCircuitBreaker circuitBreaker, HystrixThreadPool threadPool, int sleepTime, int timeout, int fallbackBehavior) {
+            super(testPropsBuilder()
+                    .setCommandKey(key)
+                    .setThreadPool(threadPool)
+                    .setCircuitBreaker(circuitBreaker)
+                    .setMetrics(circuitBreaker.metrics)
                     .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(timeout)));
             this.fallbackBehavior = fallbackBehavior;
             this.sleepTime = sleepTime;
@@ -4721,6 +5095,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             didExecute = true;
             try {
                 Thread.sleep(sleepTime);
+                System.out.println("Woke up");
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
@@ -4760,7 +5135,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     private static class NoRequestCacheTimeoutWithoutFallback extends TestHystrixCommand<Boolean> {
         public NoRequestCacheTimeoutWithoutFallback(TestCircuitBreaker circuitBreaker) {
             super(testPropsBuilder().setCircuitBreaker(circuitBreaker).setMetrics(circuitBreaker.metrics)
-                    .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(200)));
+                    .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(200).withCircuitBreakerEnabled(false)));
 
             // we want it to timeout
         }
@@ -4861,7 +5236,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
         private final CountDownLatch startLatch, waitLatch;
 
         /**
-         * 
+         *
          * @param circuitBreaker circuit breaker (passed in so it may be shared)
          * @param semaphore semaphore (passed in so it may be shared)
          * @param startLatch
@@ -4871,10 +5246,19 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
          *            this command calls {@link java.util.concurrent.CountDownLatch#await()} once it starts
          *            to run. The caller can use the latch to signal the command to finish
          */
-        private LatchedSemaphoreCommand(TestCircuitBreaker circuitBreaker, TryableSemaphore semaphore,
-                CountDownLatch startLatch, CountDownLatch waitLatch) {
-            super(testPropsBuilder().setCircuitBreaker(circuitBreaker).setMetrics(circuitBreaker.metrics)
-                    .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionIsolationStrategy(ExecutionIsolationStrategy.SEMAPHORE))
+        private LatchedSemaphoreCommand(TestCircuitBreaker circuitBreaker, TryableSemaphore semaphore, CountDownLatch startLatch, CountDownLatch waitLatch) {
+            this("Latched", circuitBreaker, semaphore, startLatch, waitLatch);
+        }
+
+        private LatchedSemaphoreCommand(String commandName, TestCircuitBreaker circuitBreaker, TryableSemaphore semaphore,
+                                        CountDownLatch startLatch, CountDownLatch waitLatch) {
+            super(testPropsBuilder()
+                    .setCommandKey(HystrixCommandKey.Factory.asKey(commandName))
+                    .setCircuitBreaker(circuitBreaker)
+                    .setMetrics(circuitBreaker.metrics)
+                    .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter()
+                            .withExecutionIsolationStrategy(ExecutionIsolationStrategy.SEMAPHORE)
+                            .withCircuitBreakerEnabled(false))
                     .setExecutionSemaphore(semaphore));
             this.startLatch = startLatch;
             this.waitLatch = waitLatch;
@@ -4959,7 +5343,7 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
     private static class RequestCacheTimeoutWithoutFallback extends TestHystrixCommand<Boolean> {
         public RequestCacheTimeoutWithoutFallback(TestCircuitBreaker circuitBreaker) {
             super(testPropsBuilder().setCircuitBreaker(circuitBreaker).setMetrics(circuitBreaker.metrics)
-                    .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(200)));
+                    .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter().withExecutionTimeoutInMilliseconds(200).withCircuitBreakerEnabled(false)));
             // we want it to timeout
         }
 
@@ -5074,6 +5458,36 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
     }
 
+    private static class AsyncCacheableCommand extends HystrixCommand<Boolean> {
+        private final String arg;
+        private final AtomicBoolean cancelled = new AtomicBoolean(false);
+
+        public AsyncCacheableCommand(String arg) {
+            super(Setter.withGroupKey(HystrixCommandGroupKey.Factory.asKey("ASYNC")));
+            this.arg = arg;
+        }
+
+        @Override
+        protected Boolean run() {
+            try {
+                Thread.sleep(500);
+                return true;
+            } catch (InterruptedException ex) {
+                cancelled.set(true);
+                throw new RuntimeException(ex);
+            }
+        }
+
+        @Override
+        protected String getCacheKey() {
+            return arg;
+        }
+
+        public boolean isCancelled() {
+            return cancelled.get();
+        }
+    }
+
     private static class BusinessException extends Exception {
         public BusinessException(String msg) {
             super(msg);
@@ -5122,12 +5536,17 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
 
     private static class InterruptibleCommand extends TestHystrixCommand<Boolean> {
 
-        public InterruptibleCommand(TestCircuitBreaker circuitBreaker, boolean shouldInterrupt) {
+        public InterruptibleCommand(TestCircuitBreaker circuitBreaker, boolean shouldInterrupt, boolean shouldInterruptOnCancel, int timeoutInMillis) {
             super(testPropsBuilder()
                     .setCircuitBreaker(circuitBreaker).setMetrics(circuitBreaker.metrics)
                     .setCommandPropertiesDefaults(HystrixCommandPropertiesTest.getUnitTestPropertiesSetter()
+                    		.withExecutionIsolationThreadInterruptOnFutureCancel(shouldInterruptOnCancel)
                             .withExecutionIsolationThreadInterruptOnTimeout(shouldInterrupt)
-                            .withExecutionTimeoutInMilliseconds(100)));
+                            .withExecutionTimeoutInMilliseconds(timeoutInMillis)));
+        }
+
+        public InterruptibleCommand(TestCircuitBreaker circuitBreaker, boolean shouldInterrupt) {
+        	this(circuitBreaker, shouldInterrupt, false, 100);
         }
 
         private volatile boolean hasBeenInterrupted;
@@ -5176,4 +5595,6 @@ public class HystrixCommandTest extends CommonHystrixCommandTests<TestHystrixCom
             return false;
         }
     }
+
+
 }

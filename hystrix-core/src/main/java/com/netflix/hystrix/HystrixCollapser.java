@@ -15,22 +15,6 @@
  */
 package com.netflix.hystrix;
 
-import java.util.Collection;
-import java.util.Collections;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Future;
-
-import com.netflix.hystrix.strategy.metrics.HystrixMetricsPublisherFactory;
-import com.netflix.hystrix.strategy.properties.HystrixPropertiesFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import rx.Observable;
-import rx.Scheduler;
-import rx.functions.Func1;
-import rx.schedulers.Schedulers;
-import rx.subjects.ReplaySubject;
-
 import com.netflix.hystrix.HystrixCommandProperties.ExecutionIsolationStrategy;
 import com.netflix.hystrix.collapser.CollapserTimer;
 import com.netflix.hystrix.collapser.HystrixCollapserBridge;
@@ -40,7 +24,24 @@ import com.netflix.hystrix.collapser.RequestCollapserFactory;
 import com.netflix.hystrix.exception.HystrixRuntimeException;
 import com.netflix.hystrix.strategy.HystrixPlugins;
 import com.netflix.hystrix.strategy.concurrency.HystrixRequestContext;
+import com.netflix.hystrix.strategy.metrics.HystrixMetricsPublisherFactory;
+import com.netflix.hystrix.strategy.properties.HystrixPropertiesFactory;
 import com.netflix.hystrix.strategy.properties.HystrixPropertiesStrategy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import rx.Observable;
+import rx.Scheduler;
+import rx.Subscription;
+import rx.functions.Action0;
+import rx.functions.Action1;
+import rx.functions.Func0;
+import rx.schedulers.Schedulers;
+import rx.subjects.ReplaySubject;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
 
 /**
  * Collapse multiple requests into a single {@link HystrixCommand} execution based on a time window and optionally a max batch size.
@@ -153,9 +154,9 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
 
             @Override
             public Observable<BatchReturnType> createObservableCommand(Collection<CollapsedRequest<ResponseType, RequestArgumentType>> requests) {
-                HystrixCommand<BatchReturnType> command = self.createCommand(requests);
+                final HystrixCommand<BatchReturnType> command = self.createCommand(requests);
 
-                command.markAsCollapsedCommand(requests.size());
+                command.markAsCollapsedCommand(this.getCollapserKey(), requests.size());
                 self.metrics.markBatch(requests.size());
 
                 return command.toObservable();
@@ -163,16 +164,13 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
 
             @Override
             public Observable<Void> mapResponseToRequests(Observable<BatchReturnType> batchResponse, final Collection<CollapsedRequest<ResponseType, RequestArgumentType>> requests) {
-                return batchResponse.single().flatMap(new Func1<BatchReturnType, Observable<Void>>() {
-
+                return batchResponse.single().doOnNext(new Action1<BatchReturnType>() {
                     @Override
-                    public Observable<Void> call(BatchReturnType response) {
+                    public void call(BatchReturnType batchReturnType) {
                         // this is a blocking call in HystrixCollapser
-                        self.mapResponseToRequests(response, requests);
-                        return Observable.empty();
+                        self.mapResponseToRequests(batchReturnType, requests);
                     }
-
-                });
+                }).ignoreElements().cast(Void.class);
             }
 
             @Override
@@ -336,12 +334,17 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
      *         to transform the {@code <BatchReturnType>} into {@code <ResponseType>}
      */
     public Observable<ResponseType> observe() {
-        // us a ReplaySubject to buffer the eagerly subscribed-to Observable
+        // use a ReplaySubject to buffer the eagerly subscribed-to Observable
         ReplaySubject<ResponseType> subject = ReplaySubject.create();
         // eagerly kick off subscription
-        toObservable().subscribe(subject);
+        final Subscription underlyingSubscription = toObservable().subscribe(subject);
         // return the subject that can be subscribed to later while the execution has already started
-        return subject;
+        return subject.doOnUnsubscribe(new Action0() {
+            @Override
+            public void call() {
+                underlyingSubscription.unsubscribe();
+            }
+        });
     }
 
     /**
@@ -376,38 +379,37 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
      *         {@link #mapResponseToRequests} to transform the {@code <BatchReturnType>} into {@code <ResponseType>}
      */
     public Observable<ResponseType> toObservable(Scheduler observeOn) {
+        return Observable.defer(new Func0<Observable<ResponseType>>() {
+            @Override
+            public Observable<ResponseType> call() {
+                final boolean isRequestCacheEnabled = getProperties().requestCacheEnabled().get();
+                final String cacheKey = getCacheKey();
 
-        /* try from cache first */
-        if (getProperties().requestCacheEnabled().get()) {
-            Observable<ResponseType> fromCache = requestCache.get(getCacheKey());
-            if (fromCache != null) {
-                metrics.markResponseFromCache();
-                return fromCache;
-            }
-        }
+                /* try from cache first */
+                if (isRequestCacheEnabled) {
+                    HystrixCachedObservable<ResponseType> fromCache = requestCache.get(cacheKey);
+                    if (fromCache != null) {
+                        metrics.markResponseFromCache();
+                        return fromCache.toObservable();
+                    }
+                }
 
-        RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType> requestCollapser = collapserFactory.getRequestCollapser(collapserInstanceWrapper);
-        Observable<ResponseType> response = requestCollapser.submitRequest(getRequestArgument());
-        metrics.markRequestBatched();
-        if (getProperties().requestCacheEnabled().get()) {
-            /*
-             * A race can occur here with multiple threads queuing but only one will be cached.
-             * This means we can have some duplication of requests in a thread-race but we're okay
-             * with having some inefficiency in duplicate requests in the same batch
-             * and then subsequent requests will retrieve a previously cached Observable.
-             * 
-             * If this is an issue we can make a lazy-future that gets set in the cache
-             * then only the winning 'put' will be invoked to actually call 'submitRequest'
-             */
-            Observable<ResponseType> o = response.cache();
-            Observable<ResponseType> fromCache = requestCache.putIfAbsent(getCacheKey(), o);
-            if (fromCache == null) {
-                response = o;
-            } else {
-                response = fromCache;
+                RequestCollapser<BatchReturnType, ResponseType, RequestArgumentType> requestCollapser = collapserFactory.getRequestCollapser(collapserInstanceWrapper);
+                Observable<ResponseType> response = requestCollapser.submitRequest(getRequestArgument());
+
+                if (isRequestCacheEnabled && cacheKey != null) {
+                    HystrixCachedObservable<ResponseType> toCache = HystrixCachedObservable.from(response);
+                    HystrixCachedObservable<ResponseType> fromCache = requestCache.putIfAbsent(cacheKey, toCache);
+                    if (fromCache == null) {
+                        return toCache.toObservable();
+                    } else {
+                        toCache.unsubscribe();
+                        return fromCache.toObservable();
+                    }
+                }
+                return response;
             }
-        }
-        return response;
+        });
     }
 
     /**
@@ -452,8 +454,9 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
      *             within an <code>ExecutionException.getCause()</code> (thrown by {@link Future#get}) if an error occurs and a fallback cannot be retrieved
      */
     public Future<ResponseType> queue() {
-        final Observable<ResponseType> o = toObservable();
-        return o.toBlocking().toFuture();
+        return toObservable()
+                .toBlocking()
+                .toFuture();
     }
 
     /**
@@ -504,26 +507,43 @@ public abstract class HystrixCollapser<BatchReturnType, ResponseType, RequestArg
          * 
          * @return RequestArgumentType
          */
-        public RequestArgumentType getArgument();
+        RequestArgumentType getArgument();
 
         /**
-         * When set any client thread blocking on get() will immediately be unblocked and receive the response.
-         * 
+         * This corresponds in a OnNext(Response); OnCompleted pair of emissions.  It represents a single-value usecase.
+         *
          * @throws IllegalStateException
-         *             if called more than once or after setException.
+         *             if called more than once or after setException/setComplete.
          * @param response
          *            ResponseType
          */
-        public void setResponse(ResponseType response);
+        void setResponse(ResponseType response);
 
         /**
-         * When set any client thread blocking on get() will immediately be unblocked and receive the exception.
+         * When invoked, any Observer will be OnNexted this value
+         * @throws IllegalStateException
+         *             if called after setException/setResponse/setComplete.
+         * @param response
+         */
+        void emitResponse(ResponseType response);
+
+        /**
+         * When set, any Observer will be OnErrored this exception
          * 
          * @param exception exception to set on response
          * @throws IllegalStateException
-         *             if called more than once or after setResponse.
+         *             if called more than once or after setResponse/setComplete.
          */
-        public void setException(Exception exception);
+        void setException(Exception exception);
+
+        /**
+         * When set, any Observer will have an OnCompleted emitted.
+         * The intent is to use if after a series of emitResponses
+         *
+         * Note that, unlike the other 3 methods above, this method does not throw an IllegalStateException.
+         * This allows Hystrix-core to unilaterally call it without knowing the internal state.
+         */
+        void setComplete();
     }
 
     /**

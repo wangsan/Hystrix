@@ -16,9 +16,9 @@
 package com.netflix.hystrix.collapser;
 
 import java.util.Collection;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.slf4j.Logger;
@@ -28,7 +28,6 @@ import rx.Observable;
 import rx.functions.Action0;
 import rx.functions.Action1;
 
-import com.netflix.hystrix.HystrixCollapser;
 import com.netflix.hystrix.HystrixCollapser.CollapsedRequest;
 import com.netflix.hystrix.HystrixCollapserProperties;
 
@@ -41,18 +40,20 @@ import com.netflix.hystrix.HystrixCollapserProperties;
  */
 public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
 
-    private static final Logger logger = LoggerFactory.getLogger(HystrixCollapser.class);
+    private static final Logger logger = LoggerFactory.getLogger(RequestBatch.class);
 
     private final HystrixCollapserBridge<BatchReturnType, ResponseType, RequestArgumentType> commandCollapser;
-    final ConcurrentLinkedQueue<CollapsedRequest<ResponseType, RequestArgumentType>> requests = new ConcurrentLinkedQueue<CollapsedRequest<ResponseType, RequestArgumentType>>();
-    // use AtomicInteger to count so we can use ConcurrentLinkedQueue instead of LinkedBlockingQueue
-    private final AtomicInteger count = new AtomicInteger(0);
     private final int maxBatchSize;
     private final AtomicBoolean batchStarted = new AtomicBoolean();
+
+    private final ConcurrentMap<RequestArgumentType, CollapsedRequest<ResponseType, RequestArgumentType>> argumentMap =
+            new ConcurrentHashMap<RequestArgumentType, CollapsedRequest<ResponseType, RequestArgumentType>>();
+    private final HystrixCollapserProperties properties;
 
     private ReentrantReadWriteLock batchLock = new ReentrantReadWriteLock();
 
     public RequestBatch(HystrixCollapserProperties properties, HystrixCollapserBridge<BatchReturnType, ResponseType, RequestArgumentType> commandCollapser, int maxBatchSize) {
+        this.properties = properties;
         this.commandCollapser = commandCollapser;
         this.maxBatchSize = maxBatchSize;
     }
@@ -76,19 +77,67 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
                     return null;
                 }
 
-                int s = count.incrementAndGet();
-                if (s > maxBatchSize) {
+                if (argumentMap.size() >= maxBatchSize) {
                     return null;
                 } else {
-                    CollapsedRequestObservableFunction<ResponseType, RequestArgumentType> f = new CollapsedRequestObservableFunction<ResponseType, RequestArgumentType>(arg);
-                    requests.add(f);
-                    return Observable.create(f);
+                    CollapsedRequestSubject<ResponseType, RequestArgumentType> collapsedRequest =
+                            new CollapsedRequestSubject<ResponseType, RequestArgumentType>(arg, this);
+                    final CollapsedRequestSubject<ResponseType, RequestArgumentType> existing = (CollapsedRequestSubject<ResponseType, RequestArgumentType>) argumentMap.putIfAbsent(arg, collapsedRequest);
+                    /**
+                     * If the argument already exists in the batch, then there are 2 options:
+                     * A) If request caching is ON (the default): only keep 1 argument in the batch and let all responses
+                     * be hooked up to that argument
+                     * B) If request caching is OFF: return an error to all duplicate argument requests
+                     *
+                     * This maintains the invariant that each batch has no duplicate arguments.  This prevents the impossible
+                     * logic (in a user-provided mapResponseToRequests for HystrixCollapser and the internals of HystrixObservableCollapser)
+                     * of trying to figure out which argument of a set of duplicates should get attached to a response.
+                     *
+                     * See https://github.com/Netflix/Hystrix/pull/1176 for further discussion.
+                     */
+                    if (existing != null) {
+                        boolean requestCachingEnabled = properties.requestCacheEnabled().get();
+                        if (requestCachingEnabled) {
+                            return existing.toObservable();
+                        } else {
+                            return Observable.error(new IllegalArgumentException("Duplicate argument in collapser batch : [" + arg + "]  This is not supported.  Please turn request-caching on for HystrixCollapser:" + commandCollapser.getCollapserKey().name() + " or prevent duplicates from making it into the batch!"));
+                        }
+                    } else {
+                        return collapsedRequest.toObservable();
+                    }
+
                 }
             } finally {
                 batchLock.readLock().unlock();
             }
         } else {
             return null;
+        }
+    }
+
+    /**
+     * Best-effort attempt to remove an argument from a batch.  This may get invoked when a cancellation occurs somewhere downstream.
+     * This method finds the argument in the batch, and removes it.
+     *
+     * @param arg argument to remove from batch
+     */
+    /* package-private */ void remove(RequestArgumentType arg) {
+        if (batchStarted.get()) {
+            //nothing we can do
+            return;
+        }
+
+        if (batchLock.readLock().tryLock()) {
+            try {
+                /* double-check now that we have the lock - if the batch is started, deleting is useless */
+                if (batchStarted.get()) {
+                    return;
+                }
+
+                argumentMap.remove(arg);
+            } finally {
+                batchLock.readLock().unlock();
+            }
         }
     }
 
@@ -110,11 +159,12 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
          * - close the gate so 'offer' can no longer be invoked and we turn those threads away so they create a new batch
          */
         if (batchStarted.compareAndSet(false, true)) {
-            /* wait for 'offer' threads to finish before executing the batch so 'requests' is complete */
+            /* wait for 'offer'/'remove' threads to finish before executing the batch so 'requests' is complete */
             batchLock.writeLock().lock();
+
             try {
                 // shard batches
-                Collection<Collection<CollapsedRequest<ResponseType, RequestArgumentType>>> shards = commandCollapser.shardRequests(requests);
+                Collection<Collection<CollapsedRequest<ResponseType, RequestArgumentType>>> shards = commandCollapser.shardRequests(argumentMap.values());
                 // for each shard execute its requests 
                 for (final Collection<CollapsedRequest<ResponseType, RequestArgumentType>> shardRequests : shards) {
                     try {
@@ -137,9 +187,9 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
                                 }
                                 logger.debug("Exception mapping responses to requests.", e);
                                 // if a failure occurs we want to pass that exception to all of the Futures that we've returned
-                                for (CollapsedRequest<ResponseType, RequestArgumentType> request : requests) {
+                                for (CollapsedRequest<ResponseType, RequestArgumentType> request : argumentMap.values()) {
                                     try {
-                                        ((CollapsedRequestObservableFunction<ResponseType, RequestArgumentType>) request).setExceptionIfResponseNotReceived(ee);
+                                        ((CollapsedRequestSubject<ResponseType, RequestArgumentType>) request).setExceptionIfResponseNotReceived(ee);
                                     } catch (IllegalStateException e2) {
                                         // if we have partial responses set in mapResponseToRequests
                                         // then we may get IllegalStateException as we loop over them
@@ -160,7 +210,7 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
                                 Exception e = null;
                                 for (CollapsedRequest<ResponseType, RequestArgumentType> request : shardRequests) {
                                     try {
-                                       e = ((CollapsedRequestObservableFunction<ResponseType, RequestArgumentType>) request).setExceptionIfResponseNotReceived(e,"No response set by " + commandCollapser.getCollapserKey().name() + " 'mapResponseToRequests' implementation.");
+                                       e = ((CollapsedRequestSubject<ResponseType, RequestArgumentType>) request).setExceptionIfResponseNotReceived(e,"No response set by " + commandCollapser.getCollapserKey().name() + " 'mapResponseToRequests' implementation.");
                                     } catch (IllegalStateException e2) {
                                         logger.debug("Partial success of 'mapResponseToRequests' resulted in IllegalStateException while setting 'No response set' Exception. Continuing ... ", e2);
                                     }
@@ -185,7 +235,7 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
             } catch (Exception e) {
                 logger.error("Exception while sharding requests.", e);
                 // same error handling as we do around the shards, but this is a wider net in case the shardRequest method fails
-                for (CollapsedRequest<ResponseType, RequestArgumentType> request : requests) {
+                for (CollapsedRequest<ResponseType, RequestArgumentType> request : argumentMap.values()) {
                     try {
                         request.setException(e);
                     } catch (IllegalStateException e2) {
@@ -205,8 +255,8 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
             batchLock.writeLock().lock();
             try {
                 // if we win the 'start' and once we have the lock we can now shut it down otherwise another thread will finish executing this batch
-                if (requests.size() > 0) {
-                    logger.warn("Requests still exist in queue but will not be executed due to RequestCollapser shutdown: " + requests.size(), new IllegalStateException());
+                if (argumentMap.size() > 0) {
+                    logger.warn("Requests still exist in queue but will not be executed due to RequestCollapser shutdown: " + argumentMap.size(), new IllegalStateException());
                     /*
                      * In the event that there is a concurrency bug or thread scheduling prevents the timer from ticking we need to handle this so the Future.get() calls do not block.
                      * 
@@ -214,9 +264,9 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
                      * 
                      * This safety-net just prevents the CollapsedRequestFutureImpl.get() from waiting on the CountDownLatch until its max timeout.
                      */
-                    for (CollapsedRequest<ResponseType, RequestArgumentType> request : requests) {
+                    for (CollapsedRequest<ResponseType, RequestArgumentType> request : argumentMap.values()) {
                         try {
-                            ((CollapsedRequestObservableFunction<ResponseType, RequestArgumentType>) request).setExceptionIfResponseNotReceived(new IllegalStateException("Requests not executed before shutdown."));
+                            ((CollapsedRequestSubject<ResponseType, RequestArgumentType>) request).setExceptionIfResponseNotReceived(new IllegalStateException("Requests not executed before shutdown."));
                         } catch (Exception e) {
                             logger.debug("Failed to setException on CollapsedRequestFutureImpl instances.", e);
                         }
@@ -233,4 +283,7 @@ public class RequestBatch<BatchReturnType, ResponseType, RequestArgumentType> {
         }
     }
 
+    public int getSize() {
+        return argumentMap.size();
+    }
 }

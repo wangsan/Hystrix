@@ -19,46 +19,57 @@ import java.util.List;
 
 public interface HystrixInvokableInfo<R> {
 
-    public HystrixCommandGroupKey getCommandGroup();
+    HystrixCommandGroupKey getCommandGroup();
 
-    public HystrixCommandKey getCommandKey();
+    HystrixCommandKey getCommandKey();
 
-    public HystrixThreadPoolKey getThreadPoolKey();
+    HystrixThreadPoolKey getThreadPoolKey();
 
-    public HystrixCommandMetrics getMetrics();
+    String getPublicCacheKey(); //have to use public in the name, as there's already a protected {@link AbstractCommand#getCacheKey()} method.
 
-    public HystrixCommandProperties getProperties();
+    HystrixCollapserKey getOriginatingCollapserKey();
 
-    public boolean isCircuitBreakerOpen();
+    HystrixCommandMetrics getMetrics();
 
-    public boolean isExecutionComplete();
+    HystrixCommandProperties getProperties();
 
-    public boolean isExecutedInThread();
+    boolean isCircuitBreakerOpen();
 
-    public boolean isSuccessfulExecution();
+    boolean isExecutionComplete();
 
-    public boolean isFailedExecution();
+    boolean isExecutedInThread();
 
-    public Throwable getFailedExecutionException();
+    boolean isSuccessfulExecution();
 
-    public boolean isResponseFromFallback();
+    boolean isFailedExecution();
 
-    public boolean isResponseTimedOut();
+    Throwable getFailedExecutionException();
 
-    public boolean isResponseShortCircuited();
+    boolean isResponseFromFallback();
 
-    public boolean isResponseFromCache();
+    boolean isResponseTimedOut();
 
-    public boolean isResponseRejected();
+    boolean isResponseShortCircuited();
 
-    public List<HystrixEventType> getExecutionEvents();
+    boolean isResponseFromCache();
 
-    public int getNumberEmissions();
+    boolean isResponseRejected();
 
-    public int getNumberFallbackEmissions();
+    boolean isResponseSemaphoreRejected();
 
-    public int getExecutionTimeInMilliseconds();
+    boolean isResponseThreadPoolRejected();
 
-    public long getCommandRunStartTimeInNanos();
+    List<HystrixEventType> getExecutionEvents();
 
+    int getNumberEmissions();
+
+    int getNumberFallbackEmissions();
+
+    int getNumberCollapsed();
+
+    int getExecutionTimeInMilliseconds();
+
+    long getCommandRunStartTimeInNanos();
+
+    ExecutionResult.EventCounts getEventCounts();
 }

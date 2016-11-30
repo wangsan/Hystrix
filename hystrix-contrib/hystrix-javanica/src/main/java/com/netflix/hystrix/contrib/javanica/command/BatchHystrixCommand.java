@@ -1,12 +1,12 @@
 /**
  * Copyright 2012 Netflix, Inc.
- *
+ * <p/>
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- *
+ * <p/>
  * http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p/>
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,15 +26,18 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
+import static com.netflix.hystrix.contrib.javanica.exception.ExceptionUtils.unwrapCause;
+import static com.netflix.hystrix.contrib.javanica.utils.CommonUtils.createArgsForFallback;
+
 /**
  * This command is used in collapser.
  */
 @ThreadSafe
 public class BatchHystrixCommand extends AbstractHystrixCommand<List<Object>> {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(GenericCommand.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(BatchHystrixCommand.class);
 
-    protected BatchHystrixCommand(HystrixCommandBuilder builder) {
+    public BatchHystrixCommand(HystrixCommandBuilder builder) {
         super(builder);
     }
 
@@ -63,22 +66,26 @@ public class BatchHystrixCommand extends AbstractHystrixCommand<List<Object>> {
     protected List<Object> getFallback() {
         if (getFallbackAction() != null) {
             final CommandAction commandAction = getFallbackAction();
-            final Object[] args = toArgs(getCollapsedRequests());
+
             try {
                 return (List<Object>) process(new Action() {
                     @Override
                     Object execute() {
-                        return commandAction.executeWithArgs(ExecutionType.SYNCHRONOUS, args);
+                        MetaHolder metaHolder = commandAction.getMetaHolder();
+                        Object[] args = toArgs(getCollapsedRequests());
+                        args = createArgsForFallback(args, metaHolder, getExecutionException());
+                        return commandAction.executeWithArgs(commandAction.getMetaHolder().getFallbackExecutionType(), args);
                     }
                 });
             } catch (Throwable e) {
                 LOGGER.error(FallbackErrorMessageBuilder.create()
                         .append(commandAction, e).build());
-                throw new FallbackInvocationException(e.getCause());
+                throw new FallbackInvocationException(unwrapCause(e));
             }
         } else {
             return super.getFallback();
         }
+
     }
 
     private Object[] toArgs(Collection<HystrixCollapser.CollapsedRequest<Object, Object>> requests) {

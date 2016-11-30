@@ -18,16 +18,20 @@ package com.netflix.hystrix;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import rx.Observable;
-import rx.Observable.OnSubscribe;
-import rx.Subscriber;
+import rx.functions.Action0;
 
 import com.netflix.hystrix.exception.HystrixBadRequestException;
 import com.netflix.hystrix.exception.HystrixRuntimeException;
 import com.netflix.hystrix.exception.HystrixRuntimeException.FailureType;
 import com.netflix.hystrix.strategy.executionhook.HystrixCommandExecutionHook;
 import com.netflix.hystrix.strategy.properties.HystrixPropertiesStrategy;
+import rx.functions.Func0;
 
 /**
  * Used to wrap code that will execute potentially risky functionality (typically meaning a service call over the network)
@@ -40,6 +44,7 @@ import com.netflix.hystrix.strategy.properties.HystrixPropertiesStrategy;
  * @ThreadSafe
  */
 public abstract class HystrixCommand<R> extends AbstractCommand<R> implements HystrixExecutable<R>, HystrixInvokableInfo<R>, HystrixObservable<R> {
+
 
     /**
      * Construct a {@link HystrixCommand} with defined {@link HystrixCommandGroupKey}.
@@ -257,7 +262,10 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
 
     }
 
-    /**
+	private final AtomicReference<Thread> executionThread = new AtomicReference<Thread>();
+	private final AtomicBoolean interruptOnFutureCancel = new AtomicBoolean(false);
+
+	/**
      * Implement this method with code to be executed when {@link #execute()} or {@link #queue()} are invoked.
      * 
      * @return R response type
@@ -286,35 +294,35 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
 
     @Override
     final protected Observable<R> getExecutionObservable() {
-        return Observable.create(new OnSubscribe<R>() {
-
+        return Observable.defer(new Func0<Observable<R>>() {
             @Override
-            public void call(Subscriber<? super R> s) {
+            public Observable<R> call() {
                 try {
-                    s.onNext(run());
-                    s.onCompleted();
-                } catch (Throwable e) {
-                    s.onError(e);
+                    return Observable.just(run());
+                } catch (Throwable ex) {
+                    return Observable.error(ex);
                 }
             }
-
+        }).doOnSubscribe(new Action0() {
+            @Override
+            public void call() {
+                // Save thread on which we get subscribed so that we can interrupt it later if needed
+                executionThread.set(Thread.currentThread());
+            }
         });
     }
 
     @Override
     final protected Observable<R> getFallbackObservable() {
-        return Observable.create(new OnSubscribe<R>() {
-
+        return Observable.defer(new Func0<Observable<R>>() {
             @Override
-            public void call(Subscriber<? super R> s) {
+            public Observable<R> call() {
                 try {
-                    s.onNext(getFallback());
-                    s.onCompleted();
-                } catch (Throwable e) {
-                    s.onError(e);
+                    return Observable.just(getFallback());
+                } catch (Throwable ex) {
+                    return Observable.error(ex);
                 }
             }
-
         });
     }
 
@@ -362,21 +370,64 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
      */
     public Future<R> queue() {
         /*
-         * --- Schedulers.immediate()
-         * 
-         * We use the 'immediate' schedule since Future.get() is blocking so we don't want to bother doing the callback to the Future on a separate thread
-         * as we don't need to separate the Hystrix thread from user threads since they are already providing it via the Future.get() call.
-         * 
-         * We pass 'false' to tell the Observable we will block on it so it doesn't schedule an async timeout.
-         * 
-         * This optimizes for using the calling thread to do the timeout rather than scheduling another thread.
-         * 
-         * In a tight-loop of executing commands this optimization saves a few microseconds per execution.
-         * It also just makes no sense to use a separate thread to timeout the command when the calling thread
-         * is going to sit waiting on it.
+         * The Future returned by Observable.toBlocking().toFuture() does not implement the
+         * interruption of the execution thread when the "mayInterrupt" flag of Future.cancel(boolean) is set to true;
+         * thus, to comply with the contract of Future, we must wrap around it.
          */
-        final Observable<R> o = toObservable();
-        final Future<R> f = o.toBlocking().toFuture();
+        final Future<R> delegate = toObservable().toBlocking().toFuture();
+    	
+        final Future<R> f = new Future<R>() {
+
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                if (delegate.isCancelled()) {
+                    return false;
+                }
+
+                if (HystrixCommand.this.getProperties().executionIsolationThreadInterruptOnFutureCancel().get()) {
+                    /*
+                     * The only valid transition here is false -> true. If there are two futures, say f1 and f2, created by this command
+                     * (which is super-weird, but has never been prohibited), and calls to f1.cancel(true) and to f2.cancel(false) are
+                     * issued by different threads, it's unclear about what value would be used by the time mayInterruptOnCancel is checked.
+                     * The most consistent way to deal with this scenario is to say that if *any* cancellation is invoked with interruption,
+                     * than that interruption request cannot be taken back.
+                     */
+                    interruptOnFutureCancel.compareAndSet(false, mayInterruptIfRunning);
+        		}
+
+                final boolean res = delegate.cancel(interruptOnFutureCancel.get());
+
+                if (!isExecutionComplete() && interruptOnFutureCancel.get()) {
+                    final Thread t = executionThread.get();
+                    if (t != null && !t.equals(Thread.currentThread())) {
+                        t.interrupt();
+                    }
+                }
+
+                return res;
+			}
+
+            @Override
+            public boolean isCancelled() {
+                return delegate.isCancelled();
+			}
+
+            @Override
+            public boolean isDone() {
+                return delegate.isDone();
+			}
+
+            @Override
+            public R get() throws InterruptedException, ExecutionException {
+                return delegate.get();
+            }
+
+            @Override
+            public R get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+                return delegate.get(timeout, unit);
+            }
+        	
+        };
 
         /* special handling of error states that throw immediately */
         if (f.isDone()) {
@@ -389,13 +440,15 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
                     return f;
                 } else if (re instanceof HystrixRuntimeException) {
                     HystrixRuntimeException hre = (HystrixRuntimeException) re;
-                    if (hre.getFailureType() == FailureType.COMMAND_EXCEPTION || hre.getFailureType() == FailureType.TIMEOUT) {
-                        // we don't throw these types from queue() only from queue().get() as they are execution errors
-                        return f;
-                    } else {
-                        // these are errors we throw from queue() as they as rejection type errors
-                        throw hre;
-                    }
+                    switch (hre.getFailureType()) {
+					case COMMAND_EXCEPTION:
+					case TIMEOUT:
+						// we don't throw these types from queue() only from queue().get() as they are execution errors
+						return f;
+					default:
+						// these are errors we throw from queue() as they as rejection type errors
+						throw hre;
+					}
                 } else {
                     throw re;
                 }
@@ -410,4 +463,26 @@ public abstract class HystrixCommand<R> extends AbstractCommand<R> implements Hy
         return "getFallback";
     }
 
+    @Override
+    protected boolean isFallbackUserDefined() {
+        Boolean containsFromMap = commandContainsFallback.get(commandKey);
+        if (containsFromMap != null) {
+            return containsFromMap;
+        } else {
+            Boolean toInsertIntoMap;
+            try {
+                getClass().getDeclaredMethod("getFallback");
+                toInsertIntoMap = true;
+            } catch (NoSuchMethodException nsme) {
+                toInsertIntoMap = false;
+            }
+            commandContainsFallback.put(commandKey, toInsertIntoMap);
+            return toInsertIntoMap;
+        }
+    }
+
+    @Override
+    protected boolean commandIsScalar() {
+        return true;
+    }
 }

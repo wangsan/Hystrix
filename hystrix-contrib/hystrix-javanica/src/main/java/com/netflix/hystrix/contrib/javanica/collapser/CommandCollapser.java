@@ -16,13 +16,10 @@
 package com.netflix.hystrix.contrib.javanica.collapser;
 
 import com.netflix.hystrix.HystrixCollapser;
-import com.netflix.hystrix.HystrixCollapserKey;
 import com.netflix.hystrix.HystrixCommand;
 import com.netflix.hystrix.contrib.javanica.command.BatchHystrixCommand;
-import com.netflix.hystrix.contrib.javanica.command.BatchHystrixCommandFactory;
+import com.netflix.hystrix.contrib.javanica.command.HystrixCommandBuilderFactory;
 import com.netflix.hystrix.contrib.javanica.command.MetaHolder;
-import com.netflix.hystrix.contrib.javanica.conf.HystrixPropertiesManager;
-import org.apache.commons.lang3.StringUtils;
 
 import java.util.Collection;
 import java.util.List;
@@ -48,12 +45,7 @@ public class CommandCollapser extends HystrixCollapser<List<Object>, Object, Obj
      * @param metaHolder the {@link MetaHolder}
      */
     public CommandCollapser(MetaHolder metaHolder) {
-        super(new CollapserSetterBuilder()
-                .collapserKey(metaHolder.getHystrixCollapser().collapserKey(), metaHolder.getDefaultCollapserKey())
-                .scope(metaHolder.getHystrixCollapser().scope())
-                .build());
-        HystrixPropertiesManager.setCollapserProperties(metaHolder.getHystrixCollapser().collapserProperties(),
-                getCollapserKey().name());
+        super(HystrixCommandBuilderFactory.getInstance().create(metaHolder).getSetterBuilder().buildCollapserCommandSetter());
         this.metaHolder = metaHolder;
     }
 
@@ -71,7 +63,7 @@ public class CommandCollapser extends HystrixCollapser<List<Object>, Object, Obj
     @Override
     protected HystrixCommand<List<Object>> createCommand(
             Collection<CollapsedRequest<Object, Object>> collapsedRequests) {
-        return BatchHystrixCommandFactory.getInstance().create(metaHolder, collapsedRequests);
+       return new BatchHystrixCommand(HystrixCommandBuilderFactory.getInstance().create(metaHolder, collapsedRequests));
     }
 
     /**
@@ -86,30 +78,6 @@ public class CommandCollapser extends HystrixCollapser<List<Object>, Object, Obj
         int count = 0;
         for (CollapsedRequest<Object, Object> request : collapsedRequests) {
             request.setResponse(batchResponse.get(count++));
-        }
-    }
-
-    /**
-     * Builder for {@link Setter}.
-     */
-    private static final class CollapserSetterBuilder {
-
-        private String collapserKey;
-
-        private Scope scope;
-
-        private CollapserSetterBuilder collapserKey(String pCollapserKey, String def) {
-            this.collapserKey = StringUtils.isNotEmpty(pCollapserKey) ? pCollapserKey : def;
-            return this;
-        }
-
-        private CollapserSetterBuilder scope(Scope pScope) {
-            this.scope = pScope;
-            return this;
-        }
-
-        public Setter build() {
-            return Setter.withCollapserKey(HystrixCollapserKey.Factory.asKey(collapserKey)).andScope(scope);
         }
     }
 

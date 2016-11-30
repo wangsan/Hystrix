@@ -20,7 +20,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.netflix.hystrix.contrib.javanica.command.ExecutionType;
 import com.netflix.hystrix.contrib.javanica.command.MethodExecutionAction;
-import org.apache.commons.collections.CollectionUtils;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
@@ -60,9 +59,9 @@ public class CacheInvocationContext<A extends Annotation> {
         this.cacheKeyMethod = cacheKeyMethod;
         this.cacheAnnotation = cacheAnnotation;
         Class<?>[] parametersTypes = method.getParameterTypes();
-        Annotation[][] parametersAnnotations = method.getParameterAnnotations();
         int parameterCount = parametersTypes.length;
         if (parameterCount > 0) {
+            Annotation[][] parametersAnnotations = method.getParameterAnnotations();
             ImmutableList.Builder<CacheInvocationParameter> parametersBuilder = ImmutableList.builder();
             for (int pos = 0; pos < parameterCount; pos++) {
                 Class<?> paramType = parametersTypes[pos];
@@ -142,7 +141,7 @@ public class CacheInvocationContext<A extends Annotation> {
      * @return true if at least one method argument with {@link com.netflix.hystrix.contrib.javanica.cache.annotation.CacheKey} annotation
      */
     public boolean hasKeyParameters() {
-        return CollectionUtils.isNotEmpty(keyParameters);
+        return !keyParameters.isEmpty();
     }
 
     /**
